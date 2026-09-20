@@ -136,3 +136,34 @@ iba-mba-prep/
 All state lives in one `localStorage` key. Refreshing or closing the
 browser does not lose progress. **Reset All Progress** in Settings is the
 only way to clear it, and it asks for confirmation first.
+
+
+## AI features (Vocab, Mock Tests, VIVA)
+
+Open **Settings → AI Provider**, choose a provider, paste its key, press
+**Test connection**. Keys are saved per-provider in this browser only.
+
+| Provider | Cost | Notes |
+|---|---|---|
+| Groq | Free | Fast; ~30 req/min. Key: console.groq.com/keys |
+| Google Gemini | Free tier | Key: aistudio.google.com/apikey |
+| OpenRouter | Free `:free` models | ~20 req/min, 50/day without credit |
+| Mistral | Free tier | Free-mode prompts may be used for training |
+| LLM7.io | Free, **no key** | ~10 req/min |
+| OpenAI | Paid API credit | A ChatGPT subscription does *not* include API credit |
+| Custom | — | Any OpenAI-compatible Base URL + key + model |
+
+The free list is from https://github.com/mnfst/awesome-free-llm-apis — free
+model names change often; if one returns "model not found", change the model
+name in Settings (no code edit needed).
+
+- **Mock Tests → Generate Mock by Topic**: new IBA-style MCQs (Math / English /
+  Analytical / mixed), any topic from your curriculum, timed exam runner,
+  auto-grading, and the existing weak-topic adaptation. AI answer keys can be
+  wrong occasionally — check the worked explanation in *Review Answers*.
+- **Mock Tests → Generate from Photos**: transcribes a real paper; needs a
+  vision-capable model (Gemini, gpt-4o-mini).
+- **VIVA Practice**: AI panel asks 5–10 questions (optionally tailored to your
+  background), you answer by typing or dictating (Chrome/Edge), each answer is
+  scored /10 with strengths, improvements and a model answer. Sessions are saved.
+- **Vocab Practice**: unchanged, but now works with any provider above.

@@ -18,7 +18,8 @@ const Planner = {
   },
 
   /* Effective task list for a day, accounting for tasks that were moved
-     into or out of it by the catch-up system. */
+     into or out of it by the catch-up system, plus any AI-adaptive
+     weak-topic tasks injected by adaptTodayTasks(). */
   tasksForDay(dayNumber, state) {
     const day = this.getDay(dayNumber);
     if (!day) return [];
@@ -35,6 +36,9 @@ const Planner = {
         if (t && !tasks.find(x => x.id === taskId)) tasks.push(Object.assign({}, t, { movedFrom: move.fromDay }));
       }
     });
+    // Bring in adaptive tasks injected for this day
+    const injected = (state.injectedTasks && state.injectedTasks[dayNumber]) || [];
+    injected.forEach(t => { if (!tasks.find(x => x.id === t.id)) tasks.push(t); });
     return tasks;
   },
 
@@ -219,5 +223,61 @@ const Planner = {
     const notes = state.notes.filter(n => (n.title + " " + n.body).toLowerCase().includes(q));
     const errors = state.errorLog.filter(e => (e.question + " " + e.topic + " " + e.subject).toLowerCase().includes(q));
     return { books, topics, days, notes, errors };
+  },
+
+  /* Grades a completed AI-generated/uploaded mock test. answers is
+     { questionId: selectedOptionId }. Returns overall score plus a
+     per-subject breakdown, and flags any subject scoring below 60%. */
+  gradeMockAnswers(questions, answers) {
+    const bySubject = {}; // subject -> {correct, total}
+    let correct = 0;
+    const results = questions.map(q => {
+      const chosen = answers[q.id] || null;
+      const isCorrect = chosen === q.correctOptionId;
+      if (isCorrect) correct++;
+      const subj = q.subject || "mixed";
+      bySubject[subj] = bySubject[subj] || { correct: 0, total: 0 };
+      bySubject[subj].total++;
+      if (isCorrect) bySubject[subj].correct++;
+      return { question: q, chosen, isCorrect };
+    });
+    const weakSubjects = Object.keys(bySubject).filter(s => {
+      const b = bySubject[s];
+      return b.total > 0 && (b.correct / b.total) < 0.6;
+    });
+    return {
+      total: questions.length, correct, percent: questions.length ? Math.round(correct / questions.length * 100) : 0,
+      bySubject, weakSubjects, results
+    };
+  },
+
+  /* Dynamic Task Adaptation: after a mock test, any subject scoring
+     below 60% gets its topics marked Weak (feeding the existing Weak
+     Topics system) and a focused review task injected into TODAY's
+     plan — so the schedule pivots immediately rather than waiting for
+     the next scheduled review day. Returns the list of injected tasks. */
+  adaptTodayTasks(state, gradeResult) {
+    const today = this.currentDay(state);
+    state.injectedTasks[today] = state.injectedTasks[today] || [];
+    const added = [];
+    gradeResult.weakSubjects.forEach(subjectKey => {
+      const subj = CURRICULUM[subjectKey];
+      if (subj) {
+        // Mark a couple of this subject's topics Weak so they surface on the Weak Topics page too
+        subj.topics.slice(0, 2).forEach(t => { state.topicStatus[t.name] = "weak"; });
+      }
+      const already = state.injectedTasks[today].some(t => t.__adaptiveSubject === subjectKey);
+      if (already) return;
+      const task = {
+        id: "adapt" + Date.now() + "_" + subjectKey,
+        subject: subjectKey, topic: "Adaptive review (mock test result)",
+        book: "GMAT Official Guide", type: "weak", duration: 30, questionTarget: 15,
+        note: `Injected automatically: your last mock scored under 60% in ${subjectKey}. Extra focused practice added to today's plan.`,
+        __adaptiveSubject: subjectKey
+      };
+      state.injectedTasks[today].push(task);
+      added.push(task);
+    });
+    return added;
   }
 };

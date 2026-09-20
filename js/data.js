@@ -619,3 +619,16 @@ const TASK_TYPE_LABELS = {
   grammar: "Grammar", sc: "Sentence Correction", rc: "Reading Comprehension",
   cr: "Critical Reasoning", ds: "Data Sufficiency", puzzle: "Analytical Puzzle"
 };
+
+/* Starter batch of real Word Smart 1 words, seen directly in the user's
+   own uploaded copy of the book (not invented). Vocab Practice pulls its
+   batches from this list; add more as needed. */
+const VOCAB_SEED_WORDS = [
+  "Abash", "Abate", "Abdicate", "Aberration", "Abhor", "Abject", "Abnegate", "Abortive",
+  "Abridge", "Absolute", "Absolve", "Abstinent", "Abstract", "Abstruse", "Abysmal",
+  "Accolade", "Accost", "Acerbic", "Acquiesce", "Acrid", "Acrimonious", "Acumen", "Acute",
+  "Adamant", "Address", "Adherent", "Admonish", "Adroit", "Adulation", "Adulterate",
+  "Adverse", "Aesthetic", "Affable", "Affectation", "Affinity", "Affluent", "Agenda",
+  "Aggregate", "Agnostic", "Agrarian", "Alacrity", "Allege", "Alleviate", "Allocate",
+  "Alloy", "Allusion", "Aloof", "Altruism", "Ambience", "Ambiguous"
+];

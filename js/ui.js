@@ -613,12 +613,19 @@ const UI = {
         <div class="card"><h3>Average Score</h3><div class="big-number">${tests.length ? Math.round(avg) + "%" : "—"}</div></div>
         <div class="card"><h3>Latest Score</h3><div class="big-number">${tests.length ? Math.round(tests[tests.length - 1].score / tests[tests.length - 1].total * 100) + "%" : "—"}</div></div>
       </div>
-      <div class="filter-bar"><button class="btn btn-primary btn-sm" id="addMockBtn">+ Add Mock Test</button></div>
+      <div class="filter-bar">
+        <button class="btn btn-primary btn-sm" id="addMockBtn">+ Add Mock Test</button>
+        <button class="btn btn-sm" id="aiTopicMockBtn">🎯 Generate Mock by Topic</button>
+        <button class="btn btn-sm" id="aiGenerateMockBtn">📷 Generate from Photos</button>
+      </div>
+      <div id="examRunnerHost"></div>
       <div class="table-wrap"><table>
         <thead><tr><th>Test</th><th>Date</th><th>Score</th><th>Math</th><th>English</th><th>Analytical</th><th></th></tr></thead>
         <tbody id="mockTableBody"></tbody>
       </table></div>
     `;
+    document.getElementById("aiGenerateMockBtn").addEventListener("click", () => this.openAIGenerateForm());
+    document.getElementById("aiTopicMockBtn").addEventListener("click", () => this.openTopicMockForm());
     const renderTable = () => {
       const body = document.getElementById("mockTableBody");
       body.innerHTML = tests.slice().reverse().map(t => `
@@ -635,6 +642,217 @@ const UI = {
     };
     renderTable();
     document.getElementById("addMockBtn").addEventListener("click", () => this.openMockForm());
+  },
+
+  /* ==================== AI MOCK TEST: GENERATE FROM UPLOAD ==================== */
+  openAIGenerateForm() {
+    if (!GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
+    document.getElementById("modalTitle").textContent = "AI-Generate Mock Test";
+    document.getElementById("modalBody").innerHTML = `
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Upload photos of a question paper (JPG/PNG — for a PDF, screenshot each page first). The AI will transcribe real questions faithfully (using any visible answer key) or write new ones if the pages aren't readable. Reading photos needs a vision-capable model (Gemini or gpt-4o-mini work; many free text-only models do not) — use "Generate by Topic" if yours can't.</p>
+      <div class="form-field full"><label>Question images</label><input type="file" id="ai-images" accept="image/*" multiple></div>
+      <div class="form-grid">
+        <div class="form-field"><label>Subject focus</label>
+          <select id="ai-subject"><option value="mixed">Mixed (Math/English/Analytical)</option><option value="math">Mathematics</option><option value="english">English</option><option value="analytical">Analytical</option></select>
+        </div>
+        <div class="form-field"><label>Number of questions</label><input type="number" id="ai-count" value="20" min="5" max="50"></div>
+      </div>
+      <div id="aiGenStatus" style="font-size:13px;color:var(--text-2);"></div>
+      <div class="form-actions">
+        <button class="btn" id="cancelAiGen">Cancel</button>
+        <button class="btn btn-primary" id="runAiGen">Generate</button>
+      </div>
+    `;
+    document.getElementById("cancelAiGen").addEventListener("click", () => this.hideModal());
+    document.getElementById("runAiGen").addEventListener("click", async () => {
+      const files = Array.from(document.getElementById("ai-images").files || []);
+      if (files.length === 0) { this.toast("Choose at least one image first."); return; }
+      const subject = document.getElementById("ai-subject").value;
+      const count = Number(document.getElementById("ai-count").value) || 20;
+      const statusEl = document.getElementById("aiGenStatus");
+      const runBtn = document.getElementById("runAiGen");
+      runBtn.disabled = true;
+      statusEl.textContent = "Reading images…";
+      try {
+        const base64List = await Promise.all(files.map(f => this.fileToBase64(f)));
+        statusEl.textContent = "Asking the AI to read the images and build the question set — this can take a bit…";
+        const questions = await GeminiService.generateQuestionsFromImages(base64List, subject, count);
+        this.hideModal();
+        this.toast(`Generated ${questions.length} questions.`);
+        this.startExamRunner(questions);
+      } catch (err) {
+        runBtn.disabled = false;
+        statusEl.textContent = this.friendlyGeminiError(err);
+      }
+    });
+    this.showModal();
+  },
+
+  fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  },
+
+  friendlyGeminiError(err) {
+    const msg = (err && err.message) || String(err);
+    const label = GeminiService.providerLabel();
+    if (msg.startsWith("NO_API_KEY")) return `No ${label} API key set — add one in Settings → AI Provider.`;
+    if (msg.startsWith("NO_BASE_URL")) return "Enter the provider's Base URL in Settings → AI Provider.";
+    if (msg.startsWith("BAD_API_KEY")) return `${label} rejected the API key — check it in Settings (use "Test connection" there). ` + msg.replace(/^BAD_API_KEY:\s*[^.]*\.\s*/, "").slice(0, 140);
+    if (msg.startsWith("MODEL_NOT_FOUND")) return msg.replace("MODEL_NOT_FOUND: ", "");
+    if (msg.startsWith("RATE_LIMIT")) return msg.replace("RATE_LIMIT: ", "");
+    if (msg.startsWith("OVERLOADED")) return msg.replace("OVERLOADED: ", "");
+    if (msg.startsWith("NETWORK_ERROR")) return msg.replace("NETWORK_ERROR: ", "Couldn't connect — ");
+    if (msg.startsWith("MALFORMED_RESPONSE") || msg.startsWith("EMPTY_RESPONSE")) return `${label}'s response wasn't usable — just try again, or switch to a stronger model in Settings.`;
+    return "Something went wrong: " + msg.slice(0, 220);
+  },
+
+  needAiKeyModal() {
+    document.getElementById("modalTitle").textContent = "Set up an AI provider first";
+    document.getElementById("modalBody").innerHTML = `
+      <p style="font-size:13.5px;color:var(--text-2);">Pick a provider and paste a key in Settings. Groq, OpenRouter, Mistral and Gemini have free tiers, and LLM7.io needs no key at all. The key is stored only in this browser.</p>
+      <div class="form-actions"><button class="btn btn-primary" id="goToSettingsForKey">Open Settings</button></div>`;
+    document.getElementById("goToSettingsForKey").addEventListener("click", () => { this.hideModal(); App.navigate("settings"); });
+    this.showModal();
+  },
+
+  /* ==================== TIMED EXAM RUNNER ==================== */
+  startExamRunner(questions) {
+    this._exam = {
+      questions, answers: {}, flagged: {}, current: 0,
+      secondsRemaining: Math.max(600, questions.length * 90), // ~1.5 min/question, floor 10 min
+      timerHandle: null
+    };
+    this.renderExamRunner();
+    this._exam.timerHandle = setInterval(() => {
+      this._exam.secondsRemaining--;
+      if (this._exam.secondsRemaining <= 0) {
+        clearInterval(this._exam.timerHandle);
+        this.submitExam(true);
+        return;
+      }
+      const t = document.getElementById("examTimer");
+      if (t) t.textContent = this.formatSeconds(this._exam.secondsRemaining);
+    }, 1000);
+  },
+
+  formatSeconds(s) {
+    const m = Math.floor(s / 60), sec = s % 60;
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  },
+
+  renderExamRunner() {
+    const host = document.getElementById("examRunnerHost");
+    if (!host) return;
+    const ex = this._exam;
+    const q = ex.questions[ex.current];
+    const paletteHtml = ex.questions.map((qq, i) => {
+      let cls = "exam-palette-btn";
+      if (ex.answers[qq.id]) cls += " answered";
+      if (ex.flagged[qq.id]) cls += " flagged";
+      if (i === ex.current) cls += " current";
+      return `<button class="${cls}" data-goto-q="${i}">${i + 1}</button>`;
+    }).join("");
+    host.innerHTML = `
+      <div class="exam-runner">
+        <div class="exam-header">
+          <div><strong>Question ${ex.current + 1} / ${ex.questions.length}</strong> <span class="badge core">${this.esc(q.subject || "mixed")}</span></div>
+          <div id="examTimer" class="exam-timer">${this.formatSeconds(ex.secondsRemaining)}</div>
+        </div>
+        <div class="exam-palette">${paletteHtml}</div>
+        <div class="exam-question card">
+          <p class="exam-prompt">${this.esc(q.prompt)}</p>
+          <div class="exam-options">
+            ${q.options.map(o => `
+              <button class="exam-option-btn ${ex.answers[q.id] === o.id ? "selected" : ""}" data-select-option="${o.id}">
+                <span class="exam-option-letter">${o.id.toUpperCase()}</span> ${this.esc(o.text)}
+              </button>`).join("")}
+          </div>
+          <div class="exam-controls">
+            <button class="btn btn-sm" id="examPrev" ${ex.current === 0 ? "disabled" : ""}>← Prev</button>
+            <button class="btn btn-sm" id="examFlag">${ex.flagged[q.id] ? "Unflag" : "🚩 Flag for review"}</button>
+            <button class="btn btn-sm" id="examNext" ${ex.current === ex.questions.length - 1 ? "disabled" : ""}>Next →</button>
+            <button class="btn btn-primary btn-sm" id="examSubmit" style="margin-left:auto;">Submit Test</button>
+          </div>
+        </div>
+      </div>
+    `;
+    host.querySelectorAll("[data-goto-q]").forEach(btn => btn.addEventListener("click", () => {
+      ex.current = Number(btn.getAttribute("data-goto-q")); this.renderExamRunner();
+    }));
+    host.querySelectorAll("[data-select-option]").forEach(btn => btn.addEventListener("click", () => {
+      ex.answers[q.id] = btn.getAttribute("data-select-option"); this.renderExamRunner();
+    }));
+    document.getElementById("examPrev").addEventListener("click", () => { ex.current--; this.renderExamRunner(); });
+    document.getElementById("examNext").addEventListener("click", () => { ex.current++; this.renderExamRunner(); });
+    document.getElementById("examFlag").addEventListener("click", () => {
+      ex.flagged[q.id] = !ex.flagged[q.id]; this.renderExamRunner();
+    });
+    document.getElementById("examSubmit").addEventListener("click", () => {
+      const unanswered = ex.questions.length - Object.keys(ex.answers).length;
+      if (unanswered > 0 && !confirm(`${unanswered} question(s) unanswered. Submit anyway?`)) return;
+      this.submitExam(false);
+    });
+  },
+
+  submitExam(autoSubmitted) {
+    const ex = this._exam;
+    if (ex.timerHandle) clearInterval(ex.timerHandle);
+    const grade = Planner.gradeMockAnswers(ex.questions, ex.answers);
+    const bySubjPct = {};
+    Object.keys(grade.bySubject).forEach(s => {
+      const b = grade.bySubject[s];
+      bySubjPct[s] = b.total ? Math.round(b.correct / b.total * 100) : null;
+    });
+    AppState.mockTests.push({
+      id: "mock" + Date.now(), name: "AI-Generated Mock", date: new Date().toISOString().slice(0, 10),
+      score: grade.correct, total: grade.total,
+      math: bySubjPct.math ?? null, english: bySubjPct.english ?? null, analytical: bySubjPct.analytical ?? null,
+      di: null, weakAreas: grade.weakSubjects.join(", "), notes: autoSubmitted ? "Auto-submitted when time ran out." : ""
+    });
+    const adaptive = Planner.adaptTodayTasks(AppState, grade);
+    this.persist();
+    this.renderExamResults(grade, adaptive, autoSubmitted);
+  },
+
+  renderExamResults(grade, adaptiveTasks, autoSubmitted) {
+    const host = document.getElementById("examRunnerHost");
+    if (!host) return;
+    host.innerHTML = `
+      <div class="card" style="margin-bottom:16px;">
+        <h3>${autoSubmitted ? "Time's up — auto-submitted" : "Test Submitted"}</h3>
+        <div class="big-number" style="font-size:32px;margin-top:8px;">${grade.correct} / ${grade.total} (${grade.percent}%)</div>
+        <div class="grid grid-3" style="margin-top:14px;">
+          ${Object.keys(grade.bySubject).map(s => {
+            const b = grade.bySubject[s];
+            const pct = b.total ? Math.round(b.correct / b.total * 100) : 0;
+            return `<div><div class="label-sm">${this.esc(s)}</div><div class="big-number" style="font-size:20px;">${pct}%</div>
+              <div class="progress-track"><div class="progress-fill ${pct < 60 ? "red" : "green"}" style="width:${pct}%"></div></div></div>`;
+          }).join("")}
+        </div>
+        ${adaptiveTasks.length ? `<p style="margin-top:14px;font-size:13px;color:var(--text-2);">Scored under 60% in <strong>${grade.weakSubjects.join(", ")}</strong> — extra focused review was added to <strong>Today's Plan</strong> and those topics are now marked Weak.</p>` : ""}
+        <div class="form-actions" style="justify-content:flex-start;margin-top:14px;">
+          <button class="btn" id="reviewAnswersBtn">Review Answers</button>
+          <button class="btn btn-primary" id="closeExamResults">Back to Mock Test Center</button>
+        </div>
+      </div>
+      <div id="examReview"></div>
+    `;
+    document.getElementById("closeExamResults").addEventListener("click", () => { this._exam = null; this.renderCurrentPage(); });
+    document.getElementById("reviewAnswersBtn").addEventListener("click", () => {
+      const rev = document.getElementById("examReview");
+      rev.innerHTML = grade.results.map((r, i) => `
+        <div class="card" style="margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;"><strong>Q${i + 1}</strong><span class="badge ${r.isCorrect ? "strong" : "weak"}">${r.isCorrect ? "Correct" : "Incorrect"}</span></div>
+          <p style="font-size:13.5px;margin-top:6px;">${this.esc(r.question.prompt)}</p>
+          <p class="label-sm">Your answer: ${r.chosen ? r.chosen.toUpperCase() : "—"} · Correct: ${r.question.correctOptionId.toUpperCase()}</p>
+          ${r.question.explanation ? `<p class="task-note">${this.esc(r.question.explanation)}</p>` : ""}
+        </div>`).join("");
+    });
   },
 
   openMockForm() {
@@ -788,6 +1006,179 @@ const UI = {
     `;
   },
 
+  /* ==================== VOCAB PRACTICE (AI-generated) ==================== */
+  renderVocab() {
+    const el = document.getElementById("page-vocab");
+    if (this._vocab && this._vocab.mode !== "intro") {
+      this.renderVocabState();
+      return;
+    }
+    const masteredCount = Object.values(AppState.vocabMastery).filter(v => v.mastered).length;
+    el.innerHTML = `
+      <div class="page-head"><h1>Vocab Practice</h1><div class="sub">AI-generated definitions, synonyms, examples and quizzes for real Word Smart 1 words — each word is genuinely fetched, not a canned template.</div></div>
+      <div class="grid grid-3" style="margin-bottom:18px;">
+        <div class="card"><h3>Words Mastered</h3><div class="big-number">${masteredCount}</div><div class="label-sm">of ${VOCAB_SEED_WORDS.length} in the starter list</div></div>
+        <div class="card"><h3>AI Provider</h3><div class="big-number" style="font-size:18px;">${GeminiService.hasApiKey() ? this.esc(GeminiService.providerLabel()) : "Not set"}</div>
+          ${!GeminiService.hasApiKey() ? `<button class="btn btn-sm" id="vocabGoSettings" style="margin-top:8px;">Add key in Settings</button>` : ""}</div>
+        <div class="card"><h3>How it works</h3><p style="font-size:12.5px;color:var(--text-2);">Pick a batch size. Missed words are retested in the next round until you hit 100% for that batch.</p></div>
+      </div>
+      <div class="card" style="max-width:420px;">
+        <h3>Start a batch</h3>
+        <div class="form-actions" style="justify-content:flex-start;margin-top:12px;">
+          <button class="btn btn-primary" data-start-batch="25">25 words</button>
+          <button class="btn btn-primary" data-start-batch="30">30 words</button>
+        </div>
+      </div>
+    `;
+    const goBtn = document.getElementById("vocabGoSettings");
+    if (goBtn) goBtn.addEventListener("click", () => App.navigate("settings"));
+    el.querySelectorAll("[data-start-batch]").forEach(btn => btn.addEventListener("click", () => {
+      if (!GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
+      this.startVocabBatch(Number(btn.getAttribute("data-start-batch")));
+    }));
+  },
+
+  startVocabBatch(size) {
+    const unmastered = VOCAB_SEED_WORDS.filter(w => !(AppState.vocabMastery[w] && AppState.vocabMastery[w].mastered));
+    const batch = (unmastered.length ? unmastered : VOCAB_SEED_WORDS).slice(0, size);
+    if (batch.length === 0) { this.toast("All starter words are already mastered!"); return; }
+    this._vocab = { batch, queue: batch.slice(), missed: [], round: 1, mode: "loading", item: null, quizPicked: null };
+    this.renderVocabState();
+    this.loadVocabWord();
+  },
+
+  async loadVocabWord() {
+    const v = this._vocab;
+    const el = document.getElementById("page-vocab");
+    if (v.queue.length === 0) {
+      if (v.missed.length > 0) {
+        v.round++; v.queue = v.missed.slice(); v.missed = [];
+      } else {
+        v.mode = "done"; this.renderVocabState(); return;
+      }
+    }
+    const word = v.queue[0];
+    v.mode = "loading";
+    this.renderVocabState();
+    try {
+      let item;
+      if (AppState.vocabMastery[word] && AppState.vocabMastery[word].data) {
+        item = AppState.vocabMastery[word].data;
+      } else {
+        item = await GeminiService.generateVocabItem(word);
+        AppState.vocabMastery[word] = AppState.vocabMastery[word] || { mastered: false, misses: 0 };
+        AppState.vocabMastery[word].data = item;
+        this.persist();
+      }
+      v.item = item; v.mode = "card"; v.quizPicked = null;
+      this.renderVocabState();
+    } catch (err) {
+      v.mode = "error"; v.error = this.friendlyGeminiError(err);
+      this.renderVocabState();
+    }
+  },
+
+  renderVocabState() {
+    const el = document.getElementById("page-vocab");
+    if (!el) return;
+    const v = this._vocab;
+    if (!v) { this.renderVocab(); return; }
+
+    if (v.mode === "loading") {
+      el.innerHTML = `<div class="page-head"><h1>Vocab Practice</h1></div><div class="empty-state"><h3>Generating…</h3><p>Asking the AI for "${this.esc(v.queue[0] || "")}" — definition, synonyms, example and quiz.</p></div>`;
+      return;
+    }
+    if (v.mode === "error") {
+      el.innerHTML = `<div class="page-head"><h1>Vocab Practice</h1></div><div class="empty-state"><h3>Couldn't generate this word</h3><p>${this.esc(v.error)}</p></div>
+        <div class="form-actions" style="justify-content:center;margin-top:14px;"><button class="btn" id="vocabRetry">Retry</button><button class="btn" id="vocabExit">Exit</button></div>`;
+      document.getElementById("vocabRetry").addEventListener("click", () => this.loadVocabWord());
+      document.getElementById("vocabExit").addEventListener("click", () => { this._vocab = null; this.renderVocab(); });
+      return;
+    }
+    if (v.mode === "done") {
+      el.innerHTML = `<div class="page-head"><h1>Vocab Practice</h1></div>
+        <div class="card" style="text-align:center;padding:36px 20px;">
+          <h3 style="font-family:var(--font-serif);font-size:20px;">Batch mastered — ${v.batch.length}/${v.batch.length} 🎉</h3>
+          <p class="label-sm" style="margin-top:8px;">Took ${v.round} round${v.round > 1 ? "s" : ""} to get every word right.</p>
+          <div class="form-actions" style="justify-content:center;margin-top:16px;"><button class="btn btn-primary" id="vocabDoneExit">Back to Vocab Practice</button></div>
+        </div>`;
+      document.getElementById("vocabDoneExit").addEventListener("click", () => { this._vocab = null; this.renderVocab(); });
+      return;
+    }
+
+    const item = v.item;
+    const progress = `${v.batch.length - v.queue.length - (v.mode === "card" || v.mode === "quiz" ? 0 : 0)}/${v.batch.length} this round · Round ${v.round}`;
+    if (v.mode === "card") {
+      el.innerHTML = `
+        <div class="page-head"><h1>Vocab Practice</h1><div class="sub">${this.esc(progress)} · ${v.queue.length} left this round</div></div>
+        <div class="card" style="max-width:520px;">
+          <h3 style="font-family:var(--font-serif);font-size:24px;color:var(--text-1);">${this.esc(item.word)}</h3>
+          <p class="label-sm">${this.esc(item.pronunciation || "")}</p>
+          <div class="form-actions" style="justify-content:flex-start;margin:10px 0;">
+            <button class="btn btn-sm" id="vocabListen">🔊 Listen</button>
+          </div>
+          <p style="font-size:14px;margin-top:8px;"><strong>Definition:</strong> ${this.esc(item.definition)}</p>
+          <p style="font-size:13.5px;margin-top:8px;color:var(--text-2);"><strong>Synonyms:</strong> ${(item.synonyms || []).map(s => this.esc(s)).join(", ")}</p>
+          <p style="font-size:13.5px;margin-top:8px;color:var(--text-2);font-style:italic;">"${this.esc(item.example)}"</p>
+          <div class="form-actions" style="margin-top:16px;">
+            <button class="btn" id="vocabExitMid">Exit</button>
+            <button class="btn btn-primary" id="vocabToQuiz">Continue to Quiz →</button>
+          </div>
+        </div>`;
+      document.getElementById("vocabListen").addEventListener("click", () => Speech.speak(item.word));
+      document.getElementById("vocabExitMid").addEventListener("click", () => { this._vocab = null; this.renderVocab(); });
+      document.getElementById("vocabToQuiz").addEventListener("click", () => { v.mode = "quiz"; this.renderVocabState(); });
+      return;
+    }
+    if (v.mode === "quiz") {
+      const picked = v.quizPicked;
+      el.innerHTML = `
+        <div class="page-head"><h1>Vocab Practice</h1><div class="sub">${this.esc(progress)}</div></div>
+        <div class="card" style="max-width:520px;">
+          <p style="font-size:15px;">${this.esc(item.quiz.question)}</p>
+          <div class="exam-options" style="margin-top:12px;">
+            ${item.quiz.options.map(o => {
+              let cls = "exam-option-btn";
+              if (picked) {
+                if (o.id === item.quiz.correctOptionId) cls += " selected";
+                else if (o.id === picked) cls += " wrong";
+              }
+              return `<button class="${cls}" data-quiz-pick="${o.id}" ${picked ? "disabled" : ""}>
+                <span class="exam-option-letter">${o.id.toUpperCase()}</span> ${this.esc(o.text)}</button>`;
+            }).join("")}
+          </div>
+          ${picked ? `<p style="margin-top:12px;font-size:13.5px;font-weight:600;color:${picked === item.quiz.correctOptionId ? "var(--green-600)" : "var(--red-600)"};">
+              ${picked === item.quiz.correctOptionId ? "Correct!" : "Not quite — correct answer highlighted above."}</p>` : ""}
+          <div class="form-actions" style="margin-top:14px;">
+            <button class="btn" id="vocabExitMid2">Exit</button>
+            ${picked ? `<button class="btn btn-primary" id="vocabNextWord">Next word →</button>` : ""}
+          </div>
+        </div>`;
+      document.getElementById("vocabExitMid2").addEventListener("click", () => { this._vocab = null; this.renderVocab(); });
+      if (!picked) {
+        el.querySelectorAll("[data-quiz-pick]").forEach(btn => btn.addEventListener("click", () => {
+          v.quizPicked = btn.getAttribute("data-quiz-pick");
+          const correct = v.quizPicked === item.quiz.correctOptionId;
+          const word = v.queue[0];
+          if (correct) {
+            AppState.vocabMastery[word].mastered = true;
+          } else {
+            AppState.vocabMastery[word].misses = (AppState.vocabMastery[word].misses || 0) + 1;
+            if (!v.missed.includes(word)) v.missed.push(word);
+          }
+          this.persist();
+          this.renderVocabState();
+        }));
+      } else {
+        document.getElementById("vocabNextWord").addEventListener("click", () => {
+          v.queue.shift();
+          this.loadVocabWord();
+        });
+      }
+      return;
+    }
+  },
+
   /* ==================== SETTINGS ==================== */
   renderSettings() {
     const el = document.getElementById("page-settings");
@@ -812,6 +1203,7 @@ const UI = {
           <button class="btn btn-primary" id="saveSettings">Save Settings</button>
         </div>
       </div>
+      ${this.aiSettingsCardHtml(s)}
       <div class="card" style="max-width:560px;margin-top:16px;">
         <h3>Manual Day Pointer</h3>
         <p class="label-sm" style="margin-top:4px;">Used only when no start date is set above.</p>
@@ -841,6 +1233,7 @@ const UI = {
       this.refreshChrome();
       this.renderCurrentPage();
     });
+    this.bindAiSettings(s);
     document.getElementById("dayBack").addEventListener("click", () => {
       AppState.currentDayPointer = Math.max(1, AppState.currentDayPointer - 1);
       this.persist(); this.refreshChrome(); this.renderCurrentPage();
@@ -891,6 +1284,340 @@ const UI = {
   },
 
   /* ==================== PAGE ROUTER ==================== */
+
+  /* ==================== AI MOCK TEST: GENERATE BY TOPIC (no photos) ==================== */
+  openTopicMockForm() {
+    if (!GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
+    document.getElementById("modalTitle").textContent = "Generate Mock Test";
+    document.getElementById("modalBody").innerHTML = `
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Builds brand-new IBA-style MCQs with <strong>${this.esc(GeminiService.providerLabel())}</strong>, then runs them in the timed exam. AI answer keys can occasionally be wrong — if an answer looks off, check the worked explanation in Review.</p>
+      <div class="form-grid">
+        <div class="form-field"><label>Subject</label>
+          <select id="tm-subject"><option value="mixed">Mixed (Math + English + Analytical)</option><option value="math">Mathematics</option><option value="english">English</option><option value="analytical">Analytical</option></select></div>
+        <div class="form-field"><label>Topic (optional)</label>
+          <input type="text" id="tm-topic" list="tm-topic-list" placeholder="Pick a subject first" disabled><datalist id="tm-topic-list"></datalist></div>
+        <div class="form-field"><label>Number of questions</label><input type="number" id="tm-count" value="20" min="5" max="60"></div>
+        <div class="form-field"><label>Difficulty</label>
+          <select id="tm-diff"><option value="Easy">Easy</option><option value="Medium">Medium</option><option value="IBA-level (moderately hard)" selected>IBA-level</option><option value="Hard">Hard</option></select></div>
+      </div>
+      <div id="tmStatus" style="font-size:13px;color:var(--text-2);"></div>
+      <div class="form-actions">
+        <button class="btn" id="tmCancel">Cancel</button>
+        <button class="btn btn-primary" id="tmRun">Generate &amp; Start</button>
+      </div>`;
+    const subj = document.getElementById("tm-subject"), topic = document.getElementById("tm-topic"), list = document.getElementById("tm-topic-list");
+    subj.addEventListener("change", () => {
+      const key = subj.value;
+      if (key === "mixed" || !CURRICULUM[key]) { topic.value = ""; topic.disabled = true; topic.placeholder = "Pick a subject first"; list.innerHTML = ""; return; }
+      topic.disabled = false; topic.placeholder = "e.g. " + CURRICULUM[key].topics[0].name;
+      list.innerHTML = CURRICULUM[key].topics.map(t => `<option value="${this.esc(t.name)}">`).join("");
+    });
+    document.getElementById("tmCancel").addEventListener("click", () => this.hideModal());
+    document.getElementById("tmRun").addEventListener("click", async () => {
+      const runBtn = document.getElementById("tmRun"), status = document.getElementById("tmStatus");
+      const count = Math.max(5, Math.min(60, Number(document.getElementById("tm-count").value) || 20));
+      runBtn.disabled = true;
+      status.textContent = "Generating questions… (about " + Math.ceil(count / 10) + " AI request" + (count > 10 ? "s" : "") + ")";
+      try {
+        const questions = await GeminiService.generateMockQuestions({
+          subject: subj.value, topic: topic.value.trim(), count,
+          difficulty: document.getElementById("tm-diff").value,
+          onProgress: (done, total) => { status.textContent = `Generated ${done} of ${total} questions…`; }
+        });
+        this.hideModal();
+        this.toast(`Generated ${questions.length} questions.`);
+        this.startExamRunner(questions);
+      } catch (err) {
+        runBtn.disabled = false;
+        status.textContent = this.friendlyGeminiError(err);
+      }
+    });
+    this.showModal();
+  },
+
+  /* ==================== VIVA PRACTICE ==================== */
+  renderViva() {
+    const el = document.getElementById("page-viva");
+    if (this._viva && this._viva.mode !== "intro") { this.renderVivaState(); return; }
+    const sessions = AppState.vivaSessions || [];
+    const avg = sessions.length ? (sessions.reduce((t, x) => t + x.avgScore, 0) / sessions.length).toFixed(1) : "—";
+    const last = sessions.length ? sessions[sessions.length - 1].avgScore.toFixed(1) : "—";
+    el.innerHTML = `
+      <div class="page-head"><h1>VIVA Practice</h1><div class="sub">A mock IBA MBA interview: the AI panel asks, you answer (typed or by voice), and every answer is scored with feedback and a model answer.</div></div>
+      <div class="grid grid-3" style="margin-bottom:18px;">
+        <div class="card"><h3>Sessions Done</h3><div class="big-number">${sessions.length}</div></div>
+        <div class="card"><h3>Average Score</h3><div class="big-number">${avg}${sessions.length ? " / 10" : ""}</div></div>
+        <div class="card"><h3>Latest Session</h3><div class="big-number">${last}${sessions.length ? " / 10" : ""}</div></div>
+      </div>
+      <div class="card" style="max-width:600px;">
+        <h3>Start a VIVA</h3>
+        <div class="form-grid" style="margin-top:10px;">
+          <div class="form-field"><label>Focus</label>
+            <select id="vv-focus">
+              <option value="mixed">Realistic mix</option>
+              <option value="personal">About me &amp; motivation</option>
+              <option value="business">Business &amp; economy</option>
+              <option value="situational">Situational / leadership</option>
+              <option value="current">Current affairs</option>
+            </select></div>
+          <div class="form-field"><label>Questions</label>
+            <select id="vv-count"><option value="5">5 (quick)</option><option value="8" selected>8</option><option value="10">10 (full)</option></select></div>
+          <div class="form-field full"><label>About you (optional — tailors the personal questions)</label>
+            <textarea id="vv-profile" placeholder="e.g. BBA from NSU, 2 years in sales at a FMCG company, want to move into marketing management">${this.esc(AppState.vivaProfile || "")}</textarea></div>
+        </div>
+        <div class="form-actions" style="justify-content:flex-start;"><button class="btn btn-primary" id="vvStart">Start VIVA</button></div>
+        <p class="label-sm" style="margin-top:8px;">Uses ${GeminiService.hasApiKey() ? this.esc(GeminiService.providerLabel()) : "no AI provider yet"}. ${GeminiService.hasApiKey() ? "" : "Set one up in Settings first."} The scoring is an AI's opinion — use it to practise structure and content, not as a prediction of the real panel.</p>
+      </div>
+      ${sessions.length ? `<div class="card" style="max-width:600px;margin-top:16px;"><h3>Past sessions</h3>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Focus</th><th>Qs</th><th>Avg</th></tr></thead><tbody>
+        ${sessions.slice().reverse().slice(0, 10).map(x => `<tr><td>${this.esc(x.date)}</td><td>${this.esc(x.focus)}</td><td>${x.count}</td><td>${x.avgScore.toFixed(1)}/10</td></tr>`).join("")}
+        </tbody></table></div></div>` : ""}
+    `;
+    document.getElementById("vvStart").addEventListener("click", () => {
+      if (!GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
+      AppState.vivaProfile = document.getElementById("vv-profile").value.trim();
+      this.persist();
+      this.startViva(document.getElementById("vv-focus").value, Number(document.getElementById("vv-count").value));
+    });
+  },
+
+  async startViva(focus, count) {
+    this._viva = { mode: "loading", msg: "Your panel is preparing questions…", focus, count, questions: [], idx: 0, results: [], draft: "", saved: false };
+    this.renderVivaState();
+    try {
+      this._viva.questions = await GeminiService.generateVivaQuestions({ focus, count, profile: AppState.vivaProfile });
+      this._viva.mode = "question";
+    } catch (err) {
+      this._viva.mode = "error"; this._viva.error = this.friendlyGeminiError(err); this._viva.retry = () => this.startViva(focus, count);
+    }
+    this.renderVivaState();
+  },
+
+  stopVivaMic() {
+    if (this._vivaRec) { try { this._vivaRec.stop(); } catch (e) { /* ignore */ } this._vivaRec = null; }
+  },
+
+  exitViva() { this.stopVivaMic(); Speech.stop(); this._viva = null; this.renderViva(); },
+
+  renderVivaState() {
+    const el = document.getElementById("page-viva");
+    if (!el) return;
+    const v = this._viva;
+    if (!v) { this.renderViva(); return; }
+    const head = (sub) => `<div class="page-head"><h1>VIVA Practice</h1>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+
+    if (v.mode === "loading") {
+      el.innerHTML = head("") + `<div class="empty-state"><h3>Please wait…</h3><p>${this.esc(v.msg)}</p></div>`;
+      return;
+    }
+    if (v.mode === "error") {
+      el.innerHTML = head("") + `<div class="empty-state"><h3>That didn't work</h3><p>${this.esc(v.error)}</p></div>
+        <div class="form-actions" style="justify-content:center;margin-top:14px;"><button class="btn btn-primary" id="vvRetry">Try again</button><button class="btn" id="vvExit">Exit</button></div>`;
+      document.getElementById("vvRetry").addEventListener("click", () => { if (v.retry) v.retry(); });
+      document.getElementById("vvExit").addEventListener("click", () => this.exitViva());
+      return;
+    }
+
+    const total = v.questions.length;
+    if (v.mode === "question") {
+      const q = v.questions[v.idx];
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      el.innerHTML = head(`Question ${v.idx + 1} of ${total}`) + `
+        <div class="card" style="max-width:680px;">
+          <span class="badge core">${this.esc(q.category)}</span>
+          <p style="font-family:var(--font-serif);font-size:19px;line-height:1.45;margin:12px 0;">${this.esc(q.question)}</p>
+          <div class="form-actions" style="justify-content:flex-start;margin:0 0 10px;">
+            <button class="btn btn-sm" id="vvHear">🔊 Hear the question</button>
+            ${SR ? `<button class="btn btn-sm" id="vvMic">🎤 Dictate answer</button>` : ""}
+          </div>
+          <div class="form-field"><label>Your answer</label>
+            <textarea id="vv-answer" style="min-height:160px;" placeholder="Answer as you would in the room — aim for 30–90 seconds when spoken (roughly 80–200 words).">${this.esc(v.draft)}</textarea></div>
+          <p class="label-sm" id="vvCount"></p>
+          <div class="form-actions">
+            <button class="btn" id="vvExit">End session</button>
+            <button class="btn" id="vvSkip">Skip</button>
+            <button class="btn btn-primary" id="vvSubmit">Submit answer</button>
+          </div>
+        </div>`;
+      const ta = document.getElementById("vv-answer");
+      const updateCount = () => { const w = ta.value.trim() ? ta.value.trim().split(/\s+/).length : 0; document.getElementById("vvCount").textContent = w + " words"; v.draft = ta.value; };
+      ta.addEventListener("input", updateCount); updateCount();
+      document.getElementById("vvHear").addEventListener("click", () => { if (!Speech.speak(q.question)) this.toast("Your browser can't read aloud."); });
+      document.getElementById("vvExit").addEventListener("click", () => { if (confirm("End this session? Your answers so far won't be saved.")) this.exitViva(); });
+      document.getElementById("vvSkip").addEventListener("click", () => { this.stopVivaMic(); this.recordVivaResult({ skipped: true, score: 0, answer: "" }); });
+      document.getElementById("vvSubmit").addEventListener("click", () => this.submitVivaAnswer());
+      const mic = document.getElementById("vvMic");
+      if (mic) mic.addEventListener("click", () => {
+        if (this._vivaRec) { this.stopVivaMic(); mic.textContent = "🎤 Dictate answer"; return; }
+        try {
+          const rec = new SR(); rec.lang = "en-US"; rec.continuous = true; rec.interimResults = false;
+          rec.onresult = (e) => {
+            let add = ""; for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) add += e.results[i][0].transcript + " ";
+            if (add) { ta.value = (ta.value ? ta.value.replace(/\s*$/, " ") : "") + add; updateCount(); }
+          };
+          rec.onerror = () => { this._vivaRec = null; mic.textContent = "🎤 Dictate answer"; this.toast("Microphone unavailable — type your answer instead."); };
+          rec.onend = () => { this._vivaRec = null; mic.textContent = "🎤 Dictate answer"; };
+          rec.start(); this._vivaRec = rec; mic.textContent = "⏹ Stop dictation";
+        } catch (e) { this.toast("Couldn't start the microphone."); }
+      });
+      return;
+    }
+
+    if (v.mode === "evaluating") {
+      el.innerHTML = head(`Question ${v.idx + 1} of ${total}`) + `<div class="empty-state"><h3>The panel is scoring your answer…</h3><p>${this.esc(GeminiService.providerLabel())} is reviewing it.</p></div>`;
+      return;
+    }
+
+    if (v.mode === "feedback") {
+      const r = v.results[v.idx], q = v.questions[v.idx];
+      const pct = r.score * 10, isLast = v.idx === total - 1;
+      const list = (arr) => arr.length ? `<ul style="margin:6px 0 0 18px;font-size:13.5px;line-height:1.55;">${arr.map(x => `<li>${this.esc(x)}</li>`).join("")}</ul>` : `<p class="label-sm">—</p>`;
+      el.innerHTML = head(`Question ${v.idx + 1} of ${total}`) + `
+        <div class="card" style="max-width:680px;">
+          <p class="label-sm">${this.esc(q.question)}</p>
+          <div class="big-number" style="font-size:34px;margin-top:6px;">${r.score.toFixed(1)} <span style="font-size:16px;color:var(--text-2);">/ 10</span></div>
+          <div class="progress-track" style="margin:8px 0;"><div class="progress-fill ${pct < 50 ? "red" : "green"}" style="width:${pct}%"></div></div>
+          <p style="font-size:14px;margin-top:6px;">${this.esc(r.verdict)}</p>
+          <h3 style="margin-top:14px;">What worked</h3>${list(r.strengths)}
+          <h3 style="margin-top:14px;">To improve</h3>${list(r.improvements)}
+          <details style="margin-top:14px;"><summary style="cursor:pointer;font-weight:600;font-size:13.5px;">See a model answer</summary>
+            <p style="font-size:13.5px;line-height:1.6;margin-top:8px;color:var(--text-2);">${this.esc(r.modelAnswer)}</p></details>
+          <div class="form-actions"><button class="btn" id="vvExit">End session</button><button class="btn btn-primary" id="vvNext">${isLast ? "See results" : "Next question →"}</button></div>
+        </div>`;
+      document.getElementById("vvExit").addEventListener("click", () => { if (confirm("End this session? It won't be saved.")) this.exitViva(); });
+      document.getElementById("vvNext").addEventListener("click", () => {
+        v.draft = "";
+        if (isLast) { v.mode = "summary"; } else { v.idx++; v.mode = "question"; }
+        this.renderVivaState();
+      });
+      return;
+    }
+
+    if (v.mode === "summary") {
+      const scored = v.results.filter(r => !r.skipped);
+      const avg = v.results.length ? v.results.reduce((t, r) => t + r.score, 0) / v.results.length : 0;
+      if (!v.saved) {
+        AppState.vivaSessions.push({
+          id: "viva" + Date.now(), date: new Date().toISOString().slice(0, 10), focus: v.focus, count: v.results.length, avgScore: avg,
+          items: v.results.map((r, i) => ({ question: v.questions[i].question, category: v.questions[i].category, answer: (r.answer || "").slice(0, 2000), score: r.score, skipped: !!r.skipped }))
+        });
+        v.saved = true; this.persist();
+      }
+      const weakest = scored.length ? scored.map((r, i) => ({ r, q: v.questions[v.results.indexOf(r)] })).sort((a, b) => a.r.score - b.r.score)[0] : null;
+      el.innerHTML = head("Session complete") + `
+        <div class="card" style="max-width:680px;">
+          <div class="big-number" style="font-size:36px;">${avg.toFixed(1)} <span style="font-size:16px;color:var(--text-2);">/ 10 average</span></div>
+          <p class="label-sm">${scored.length} answered · ${v.results.length - scored.length} skipped (skips count as 0)</p>
+          <div class="table-wrap" style="margin-top:12px;"><table><thead><tr><th>#</th><th>Question</th><th>Score</th></tr></thead><tbody>
+            ${v.results.map((r, i) => `<tr><td>${i + 1}</td><td>${this.esc(v.questions[i].question)}</td><td>${r.skipped ? "skipped" : r.score.toFixed(1)}</td></tr>`).join("")}
+          </tbody></table></div>
+          ${weakest ? `<p style="font-size:13.5px;margin-top:12px;color:var(--text-2);">Lowest-scoring answer: <strong>“${this.esc(weakest.q.question)}”</strong> — re-read its model answer and try again.</p>` : ""}
+          <div class="form-actions"><button class="btn btn-primary" id="vvDone">Back to VIVA Practice</button></div>
+        </div>`;
+      document.getElementById("vvDone").addEventListener("click", () => this.exitViva());
+    }
+  },
+
+  async submitVivaAnswer() {
+    const v = this._viva, ta = document.getElementById("vv-answer");
+    const answer = (ta ? ta.value : v.draft).trim();
+    if (answer.split(/\s+/).filter(Boolean).length < 5) { this.toast("Write a few sentences first (or press Skip)."); return; }
+    this.stopVivaMic(); Speech.stop();
+    v.draft = answer; v.mode = "evaluating"; this.renderVivaState();
+    try {
+      const fb = await GeminiService.evaluateVivaAnswer(v.questions[v.idx], answer, AppState.vivaProfile);
+      this.recordVivaResult(Object.assign({ answer }, fb));
+    } catch (err) {
+      v.mode = "error"; v.error = this.friendlyGeminiError(err);
+      v.retry = () => { v.mode = "question"; this.renderVivaState(); };
+      this.renderVivaState();
+    }
+  },
+
+  recordVivaResult(result) {
+    const v = this._viva;
+    v.results[v.idx] = result;
+    if (result.skipped) {
+      v.draft = "";
+      if (v.idx === v.questions.length - 1) v.mode = "summary"; else { v.idx++; v.mode = "question"; }
+    } else {
+      v.mode = "feedback";
+    }
+    this.renderVivaState();
+  },
+
+  /* ==================== AI SETTINGS CARD ==================== */
+  aiSettingsCardHtml(s) {
+    const cur = GeminiService.getProvider();
+    const opts = Object.keys(AI_PROVIDERS).map(id => `<option value="${id}" ${id === cur ? "selected" : ""}>${this.esc(AI_PROVIDERS[id].label)}</option>`).join("");
+    return `
+      <div class="card" style="max-width:560px;margin-top:16px;">
+        <h3>AI Provider</h3>
+        <p class="label-sm" style="margin-top:4px;">Powers Vocab, Mock-Test generation and VIVA. Each provider keeps its own key, saved only in this browser's localStorage — never in the project files. Free options come from the <a href="https://github.com/mnfst/awesome-free-llm-apis" target="_blank" rel="noopener">awesome-free-llm-apis</a> list.</p>
+        <div class="form-field" style="margin-top:10px;"><label>Provider</label><select id="st-provider">${opts}</select></div>
+        <div class="form-field" id="st-baseurl-wrap"><label>Base URL</label><input type="text" id="st-baseurl" placeholder="https://api.example.com/v1"></div>
+        <div class="form-field"><label>API key</label>
+          <div style="display:flex;gap:8px;"><input type="password" id="st-apikey" style="flex:1;"><button class="btn btn-sm" id="toggleKeyVisible" type="button">Show</button></div>
+          <p class="label-sm" id="apiKeyHint"></p></div>
+        <div class="form-field"><label>Model</label><input type="text" id="st-model"><p class="label-sm" id="modelHint"></p></div>
+        <div class="form-actions" style="flex-wrap:wrap;">
+          <button class="btn btn-primary" id="saveApiKey">Save</button>
+          <button class="btn" id="testAi">Test connection</button>
+          <button class="btn btn-danger" id="clearApiKey">Remove key</button>
+        </div>
+        <div id="aiTestResult" style="font-size:13px;margin-top:8px;"></div>
+      </div>`;
+  },
+
+  bindAiSettings(s) {
+    s.apiKeys = s.apiKeys || {}; s.models = s.models || {};
+    const $ = (id) => document.getElementById(id);
+    const fill = (provider) => {
+      const p = AI_PROVIDERS[provider];
+      $("st-baseurl-wrap").style.display = p.needsBaseUrl ? "" : "none";
+      $("st-baseurl").value = p.needsBaseUrl ? (s.customBaseUrl || "") : "";
+      $("st-apikey").value = s.apiKeys[provider] || "";
+      $("st-apikey").placeholder = p.keyPlaceholder || "";
+      $("st-model").value = s.models[provider] || p.defaultModel || "";
+      $("st-model").placeholder = p.defaultModel || "model name";
+      $("apiKeyHint").innerHTML = `${p.keyHint || ""} <a href="${p.keyUrl}" target="_blank" rel="noopener">Get a key ↗</a>`;
+      $("modelHint").textContent = p.modelHint || "";
+      $("clearApiKey").style.display = s.apiKeys[provider] ? "" : "none";
+      $("aiTestResult").textContent = "";
+    };
+    const readAndSave = () => {
+      const provider = $("st-provider").value, p = AI_PROVIDERS[provider];
+      s.aiProvider = provider;
+      s.apiKeys[provider] = $("st-apikey").value.trim();
+      s.models[provider] = $("st-model").value.trim() || p.defaultModel || "";
+      if (p.needsBaseUrl) s.customBaseUrl = $("st-baseurl").value.trim();
+      this.persist();
+    };
+    fill($("st-provider").value);
+    $("st-provider").addEventListener("change", () => fill($("st-provider").value));
+    $("toggleKeyVisible").addEventListener("click", (e) => {
+      const input = $("st-apikey"); const show = input.type === "password";
+      input.type = show ? "text" : "password"; e.target.textContent = show ? "Hide" : "Show";
+    });
+    $("saveApiKey").addEventListener("click", () => { readAndSave(); this.toast("AI settings saved to this browser."); this.renderCurrentPage(); });
+    $("clearApiKey").addEventListener("click", () => {
+      const provider = $("st-provider").value; delete s.apiKeys[provider]; this.persist(); this.toast("API key removed."); this.renderCurrentPage();
+    });
+    $("testAi").addEventListener("click", async () => {
+      readAndSave();
+      const out = $("aiTestResult"); const btn = $("testAi");
+      if (!GeminiService.hasApiKey()) { out.style.color = "var(--red-600)"; out.textContent = "Enter an API key first" + (AI_PROVIDERS[s.aiProvider].needsBaseUrl ? " (and the Base URL and model)." : "."); return; }
+      btn.disabled = true; out.style.color = "var(--text-2)"; out.textContent = "Testing " + GeminiService.providerLabel() + " (" + GeminiService.getModel() + ")…";
+      try {
+        await GeminiService.testConnection();
+        out.style.color = "var(--green-600)"; out.textContent = "✓ Connected — " + GeminiService.providerLabel() + " answered correctly.";
+      } catch (err) {
+        out.style.color = "var(--red-600)"; out.textContent = "✗ " + this.friendlyGeminiError(err);
+      }
+      btn.disabled = false;
+    });
+  },
+
   renderCurrentPage() {
     const page = App.currentPage;
     const map = {
@@ -905,7 +1632,9 @@ const UI = {
       errors: () => this.renderErrors(),
       notes: () => this.renderNotes(),
       progress: () => this.renderProgress(),
-      settings: () => this.renderSettings()
+      settings: () => this.renderSettings(),
+      vocab: () => this.renderVocab(),
+      viva: () => this.renderViva()
     };
     (map[page] || map.dashboard)();
   }
