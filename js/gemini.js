@@ -344,6 +344,165 @@ Return ONLY this JSON (keep the key order — explanation comes BEFORE correctOp
     return all;
   },
 
+  /* ---------- Import a real paper (PDF text or page images) ---------- */
+  _cleanSubject(x) {
+    const t = String(x || "").toLowerCase();
+    if (/math|quant|arith|algebra|geom/.test(t)) return "math";
+    if (/eng|verbal|grammar|vocab|compre/.test(t)) return "english";
+    if (/analy|logic|reason|puzzle/.test(t)) return "analytical";
+    return "mixed";
+  },
+  _letterFrom(x) {
+    const t = String(x == null ? "" : x).trim().toLowerCase().replace(/[().\s]/g, "");
+    if (/^[a-e]$/.test(t)) return t;
+    if (/^[1-5]$/.test(t)) return String.fromCharCode(96 + Number(t));
+    return "";
+  },
+
+  /* Faithful version of a transcribed question: NO shuffling, 2-5 options,
+     answer may be unknown (null) until a key or the solver fills it in. */
+  _normaliseImported(raw, forcedSubject) {
+    if (!raw || typeof raw.prompt !== "string" || !raw.prompt.trim() || !Array.isArray(raw.options)) return null;
+    const letters = ["a", "b", "c", "d", "e"];
+    let opts = raw.options.map(o => (typeof o === "string" ? o : (o && o.text != null ? String(o.text) : ""))).map(t => t.trim()).filter(Boolean).slice(0, 5);
+    if (opts.length < 2) return null;
+    if (opts.every(t => /^\(?[A-Ea-e][\).:]\s+/.test(t))) opts = opts.map(t => t.replace(/^\(?[A-Ea-e][\).:]\s+/, ""));
+    let ci = this._letterFrom(raw.correctOptionId != null ? raw.correctOptionId : raw.answer);
+    ci = ci ? ci.charCodeAt(0) - 97 : -1;
+    if (ci >= opts.length) ci = -1;
+    const n = raw.number != null ? parseInt(raw.number, 10) : NaN;
+    return {
+      number: isFinite(n) ? n : null,
+      subject: forcedSubject && forcedSubject !== "auto" ? forcedSubject : this._cleanSubject(raw.subject),
+      prompt: raw.prompt.trim(),
+      passage: typeof raw.passage === "string" && raw.passage.trim().length > 20 ? raw.passage.trim() : null,
+      options: opts.map((t, i) => ({ id: letters[i], text: t })),
+      correctOptionId: ci >= 0 ? letters[ci] : null,
+      explanation: typeof raw.explanation === "string" ? raw.explanation.trim() : "",
+      answerSource: ci >= 0 ? "answer_key" : null
+    };
+  },
+
+  _importPrompt(batch) {
+    const source = batch.images && batch.images.length
+      ? `The attached image(s) are ${batch.label} of a multiple-choice admission-test paper (IBA MBA style). Read them carefully (they may be scans or photos).`
+      : `The text below was extracted from ${batch.label} of a multiple-choice admission-test paper (IBA MBA style). Text extraction can scramble the layout, so use judgement to put each question back together.
+===== START OF EXTRACTED TEXT =====
+${batch.text}
+===== END OF EXTRACTED TEXT =====`;
+    return `${source}
+
+Task: transcribe EVERY complete multiple-choice question that appears, in full and word-for-word.
+Rules:
+- Copy the question text and every option exactly as printed. Do not summarise, fix, or rewrite anything. Write maths in plain text (x^2, sqrt(x), 3/4, %, etc.).
+- If several questions share a reading passage, table or set of conditions, copy that shared text in FULL into the "passage" field of EVERY question that depends on it (word-for-word, not summarised), and keep "prompt" as just the question itself. A question with no passage gets "passage": "".
+- Skip a question if its options are cut off at the edge of the pages given (it will be captured in the next batch). Never invent options or questions.
+- If a question needs a figure or diagram you cannot read, still transcribe the words and append " [figure not readable]".
+- Use option ids a, b, c, d (e if there are five) in printed order, whatever labels the paper uses (A/B/C, 1/2/3, (i)/(ii)).
+- "number" is the question number printed on the paper. "subject" is math, english or analytical (use the section heading if there is one).
+- If, and only if, this content shows the correct answer for a question (an answer key table, "Ans: B", or a worked solution), put its letter in "correctOptionId". Otherwise leave "correctOptionId" as "". NEVER guess.
+- If this content contains an answer-key table/list, also list its entries in "answerKey".
+
+Return ONLY this JSON:
+{"questions":[{"number":1,"subject":"math","passage":"","prompt":"...","options":[{"id":"a","text":"..."},{"id":"b","text":"..."},{"id":"c","text":"..."},{"id":"d","text":"..."}],"correctOptionId":"","explanation":""}],
+ "answerKey":[{"subject":"math","number":1,"answer":"b"}]}
+If there are no complete questions in this content, return {"questions":[],"answerKey":[]}.`;
+  },
+
+  /* batches: [{label, text?} | {label, images:[b64,...]}]
+     opts: {subject: auto|math|english|analytical, max, solveMissing, onProgress(msg)}
+     returns {questions, stats:{extracted, fromKey, solved, dropped, skippedBatches}} */
+  async importQuestions(batches, opts) {
+    opts = opts || {};
+    const say = (m) => { if (typeof opts.onProgress === "function") opts.onProgress(m); };
+    const FATAL = /NO_API_KEY|BAD_API_KEY|MODEL_NOT_FOUND|NETWORK_ERROR|RATE_LIMIT|OVERLOADED|NO_BASE_URL/;
+    const norm = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const map = new Map();
+    const keyList = [];
+    let skippedBatches = 0;
+
+    for (let i = 0; i < batches.length; i++) {
+      const b = batches[i];
+      say(`Reading ${b.label} (${i + 1} of ${batches.length})… ${map.size} question${map.size === 1 ? "" : "s"} found so far`);
+      let parsed = null, lastErr = null;
+      for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+        try { parsed = await this.callJSON(this._importPrompt(b), b.images || [], { temperature: 0.1 }); }
+        catch (err) { lastErr = err; if (FATAL.test(err.message)) throw err; }
+      }
+      if (!parsed) { skippedBatches++; continue; }
+      const raws = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+      raws.forEach(r => {
+        const q = this._normaliseImported(r, opts.subject);
+        if (!q) return;
+        const pn = norm(q.prompt);
+        const k = pn.slice(0, 50) + "|" + pn.slice(-50) + "|" + norm(q.options[0].text).slice(0, 30);
+        const old = map.get(k);
+        if (!old) map.set(k, q);
+        else {
+          if (q.options.length > old.options.length) { q.correctOptionId = q.correctOptionId || old.correctOptionId; q.answerSource = q.correctOptionId ? "answer_key" : null; map.set(k, q); }
+          else if (!old.correctOptionId && q.correctOptionId) { old.correctOptionId = q.correctOptionId; old.answerSource = "answer_key"; }
+          if (old.number == null && q.number != null) old.number = q.number;
+          if (!old.passage && q.passage) old.passage = q.passage;
+        }
+      });
+      (Array.isArray(parsed.answerKey) ? parsed.answerKey : []).forEach(k => keyList.push(k));
+    }
+
+    let list = Array.from(map.values());
+    if (list.length === 0) throw new Error("NO_QUESTIONS: no complete multiple-choice questions were found in that file." + (skippedBatches ? " (Some pages could not be read — try again or use a different model.)" : ""));
+
+    // Apply the paper's own answer key (authoritative over anything guessed).
+    const bySN = {};
+    keyList.forEach(k => {
+      const l = this._letterFrom(k && k.answer), n = parseInt(k && k.number, 10);
+      if (!l || !isFinite(n)) return;
+      bySN[this._cleanSubject(k.subject) + "|" + n] = l;
+    });
+    list.forEach(q => {
+      if (q.number == null) return;
+      // Match on (section, number). Never on number alone: Math Q1 and English Q1 are different questions.
+      const l = bySN[q.subject + "|" + q.number] || bySN["mixed|" + q.number] || "";
+      if (l && l.charCodeAt(0) - 97 < q.options.length) { q.correctOptionId = l; q.answerSource = "answer_key"; }
+    });
+
+    if (opts.max && opts.max > 0) list = list.slice(0, opts.max);
+
+    // Anything still without a key: ask the AI to solve it (clearly flagged).
+    let solved = 0, dropped = 0;
+    const missing = list.filter(q => !q.correctOptionId);
+    if (missing.length && opts.solveMissing !== false) {
+      for (let i = 0; i < missing.length; i += 6) {
+        const chunk = missing.slice(i, i + 6);
+        say(`No answer key for ${missing.length} question${missing.length === 1 ? "" : "s"} — asking the AI to solve them (${Math.min(i + 6, missing.length)}/${missing.length})…`);
+        const payload = chunk.map((q, j) => ({ i: j, prompt: q.prompt, options: q.options }));
+        const prompt = `Solve these IBA MBA admission-test multiple-choice questions. For each one, work out the answer step by step in "explanation" FIRST (brief), then give the correct option id. Double-check arithmetic and logic.
+Questions: ${JSON.stringify(payload)}
+Return ONLY: {"answers":[{"i":0,"explanation":"...","correctOptionId":"a"}]}`;
+        try {
+          const r = await this.callJSON(prompt, [], { temperature: 0.1 });
+          (Array.isArray(r) ? r : (r.answers || [])).forEach(a => {
+            const q = chunk[a && a.i];
+            const l = this._letterFrom(a && a.correctOptionId);
+            if (q && l && l.charCodeAt(0) - 97 < q.options.length) {
+              q.correctOptionId = l; q.answerSource = "inferred";
+              if (a.explanation && !q.explanation) q.explanation = String(a.explanation);
+              solved++;
+            }
+          });
+        } catch (err) { if (FATAL.test(err.message)) throw err; }
+      }
+    }
+    const keyless = list.filter(q => !q.correctOptionId);
+    dropped = 0;
+    keyless.forEach(q => { q.answerSource = "unknown"; });   // kept: set the answer yourself in the preview
+
+    list.forEach((q, i) => { q.id = "q" + (i + 1); });
+    return {
+      questions: list,
+      stats: { extracted: list.length, unknown: keyless.length, withPassage: list.filter(q => q.passage).length, fromKey: list.filter(q => q.answerSource === "answer_key").length, solved: list.filter(q => q.answerSource === "inferred").length, dropped, skippedBatches }
+    };
+  },
+
   /* ---------- VIVA ---------- */
   _vivaFocusBrief(focus) {
     switch (focus) {

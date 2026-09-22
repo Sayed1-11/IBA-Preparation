@@ -233,11 +233,12 @@ const Planner = {
     let correct = 0;
     const results = questions.map(q => {
       const chosen = answers[q.id] || null;
-      const isCorrect = chosen === q.correctOptionId;
+      const gradable = !!q.correctOptionId;
+      const isCorrect = gradable && chosen === q.correctOptionId;
       if (isCorrect) correct++;
       const subj = q.subject || "mixed";
       bySubject[subj] = bySubject[subj] || { correct: 0, total: 0 };
-      bySubject[subj].total++;
+      if (gradable) bySubject[subj].total++;
       if (isCorrect) bySubject[subj].correct++;
       return { question: q, chosen, isCorrect };
     });
@@ -245,8 +246,10 @@ const Planner = {
       const b = bySubject[s];
       return b.total > 0 && (b.correct / b.total) < 0.6;
     });
+    const gradedTotal = questions.filter(q => !!q.correctOptionId).length;
     return {
-      total: questions.length, correct, percent: questions.length ? Math.round(correct / questions.length * 100) : 0,
+      total: gradedTotal, ungraded: questions.length - gradedTotal, correct,
+      percent: gradedTotal ? Math.round(correct / gradedTotal * 100) : 0,
       bySubject, weakSubjects, results
     };
   },

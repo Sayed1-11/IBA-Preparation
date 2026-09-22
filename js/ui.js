@@ -616,9 +616,10 @@ const UI = {
       <div class="filter-bar">
         <button class="btn btn-primary btn-sm" id="addMockBtn">+ Add Mock Test</button>
         <button class="btn btn-sm" id="aiTopicMockBtn">🎯 Generate Mock by Topic</button>
-        <button class="btn btn-sm" id="aiGenerateMockBtn">📷 Generate from Photos</button>
+        <button class="btn btn-sm" id="aiGenerateMockBtn">📄 Import Paper (built-in OCR)</button>
       </div>
       <div id="examRunnerHost"></div>
+      <div id="importedPapersHost"></div>
       <div class="table-wrap"><table>
         <thead><tr><th>Test</th><th>Date</th><th>Score</th><th>Math</th><th>English</th><th>Analytical</th><th></th></tr></thead>
         <tbody id="mockTableBody"></tbody>
@@ -642,48 +643,342 @@ const UI = {
     };
     renderTable();
     document.getElementById("addMockBtn").addEventListener("click", () => this.openMockForm());
+    this.renderImportedPapers();
   },
 
-  /* ==================== AI MOCK TEST: GENERATE FROM UPLOAD ==================== */
+  renderImportedPapers() {
+    const host = document.getElementById("importedPapersHost");
+    if (!host) return;
+    const papers = AppState.importedPapers || [];
+    if (!papers.length) { host.innerHTML = ""; return; }
+    host.innerHTML = `<div class="card" style="margin-bottom:16px;"><h3>Imported Papers</h3>
+      <div class="table-wrap"><table><thead><tr><th>Paper</th><th>Imported</th><th>Questions</th><th></th></tr></thead><tbody>
+      ${papers.slice().reverse().map(x => `<tr><td>${this.esc(x.name)}</td><td>${this.esc(x.date)}</td><td>${x.questions.length}</td>
+        <td style="white-space:nowrap;"><button class="btn btn-sm btn-primary" data-imp-start="${x.id}">Start</button>
+        <button class="btn btn-sm" data-imp-view="${x.id}">View</button>
+        <button class="btn btn-sm btn-danger" data-imp-del="${x.id}">Delete</button></td></tr>`).join("")}
+      </tbody></table></div></div>`;
+    const find = (id) => papers.find(x => x.id === id);
+    host.querySelectorAll("[data-imp-start]").forEach(b => b.addEventListener("click", () => this.startExamRunner(JSON.parse(JSON.stringify(find(b.getAttribute("data-imp-start")).questions)))));
+    host.querySelectorAll("[data-imp-view]").forEach(b => b.addEventListener("click", () => this.showImportPreview(find(b.getAttribute("data-imp-view")), true)));
+    host.querySelectorAll("[data-imp-del]").forEach(b => b.addEventListener("click", () => {
+      if (!confirm("Delete this imported paper?")) return;
+      AppState.importedPapers = AppState.importedPapers.filter(x => x.id !== b.getAttribute("data-imp-del"));
+      this.persist(); this.renderCurrentPage();
+    }));
+  },
+
+  /* ==================== AI MOCK TEST: IMPORT FROM PDF / PHOTOS ==================== */
   openAIGenerateForm() {
-    if (!GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
-    document.getElementById("modalTitle").textContent = "AI-Generate Mock Test";
+    document.getElementById("modalTitle").textContent = "Import a Mock Test (PDF, photos or pasted text)";
     document.getElementById("modalBody").innerHTML = `
-      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Upload photos of a question paper (JPG/PNG — for a PDF, screenshot each page first). The AI will transcribe real questions faithfully (using any visible answer key) or write new ones if the pages aren't readable. Reading photos needs a vision-capable model (Gemini or gpt-4o-mini work; many free text-only models do not) — use "Generate by Topic" if yours can't.</p>
-      <div class="form-field full"><label>Question images</label><input type="file" id="ai-images" accept="image/*" multiple></div>
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Upload a question-paper <strong>PDF</strong> or page photos, or just paste the text. <strong>Built-in OCR needs no API key and no account</strong> — scanned pages are read on your own machine with Tesseract (downloaded once, then cached for offline use). Questions, options and the answer key are pulled out by a local parser; anything it can't find an answer for, you can set yourself in the preview.</p>
+      <div class="form-field full"><label>Reader</label>
+        <select id="ai-engine">
+          <option value="local">Built-in OCR + local parser — no API key (recommended)</option>
+          <option value="ai">AI provider (needs a key; better on messy layouts &amp; diagrams)</option>
+        </select></div>
+      <div class="form-field full"><label>PDF or images</label><input type="file" id="ai-images" accept="application/pdf,.pdf,image/*" multiple></div>
+      <div class="form-field full"><label>…or paste the questions as text (optional)</label><textarea id="ai-paste" rows="3" placeholder="1. If 3x + 5 = 20, x = ?&#10;(a) 3 (b) 5 (c) 7 (d) 15"></textarea></div>
+      <div class="form-field full"><label>Answer key, if it is on a separate sheet (optional)</label>
+        <input type="text" id="ai-key" placeholder="1c 2a 3d 4b …  or  1-c, 2-a, 3-d" style="margin-bottom:6px;">
+        <input type="file" id="ai-keyimg" accept="application/pdf,.pdf,image/*" multiple>
+        <span class="label-sm">A photo or scan of the key page works too — it is OCR'd the same way. Section headings ("Section II: Mathematics") are read, so a key whose numbering restarts at 1 in each section is matched section by section.</span></div>
       <div class="form-grid">
-        <div class="form-field"><label>Subject focus</label>
-          <select id="ai-subject"><option value="mixed">Mixed (Math/English/Analytical)</option><option value="math">Mathematics</option><option value="english">English</option><option value="analytical">Analytical</option></select>
-        </div>
-        <div class="form-field"><label>Number of questions</label><input type="number" id="ai-count" value="20" min="5" max="50"></div>
+        <div class="form-field"><label>How to read a PDF</label>
+          <select id="ai-mode"><option value="auto">Auto (text layer if it has one, else OCR)</option><option value="images">Always OCR the pages as images</option></select></div>
+        <div class="form-field"><label>Subject</label>
+          <select id="ai-subject"><option value="auto">Auto-detect from the paper</option><option value="math">All Mathematics</option><option value="english">All English</option><option value="analytical">All Analytical</option></select></div>
+        <div class="form-field"><label>PDF pages from</label><input type="number" id="ai-from" min="1" placeholder="first"></div>
+        <div class="form-field"><label>to</label><input type="number" id="ai-to" min="1" placeholder="last"></div>
+        <div class="form-field"><label>Max questions (0 = all)</label><input type="number" id="ai-count" value="0" min="0" max="300"></div>
+        <div class="form-field"><label>No answer key in the paper?</label>
+          <select id="ai-solve"><option value="1">Let the AI work out the answers</option><option value="0">Skip those questions</option></select></div>
       </div>
-      <div id="aiGenStatus" style="font-size:13px;color:var(--text-2);"></div>
+      <p style="font-size:12px;color:var(--text-2);margin:8px 0 0;">Tip: built-in OCR takes roughly 3–8 seconds per scanned page and costs nothing. A clean text PDF is instant. For a long paper, do one section at a time with the page range.</p>
+      <div id="aiGenStatus" style="font-size:13px;color:var(--text-2);margin-top:6px;"></div>
       <div class="form-actions">
         <button class="btn" id="cancelAiGen">Cancel</button>
-        <button class="btn btn-primary" id="runAiGen">Generate</button>
+        <button class="btn btn-primary" id="runAiGen">Read &amp; Import</button>
       </div>
     `;
     document.getElementById("cancelAiGen").addEventListener("click", () => this.hideModal());
     document.getElementById("runAiGen").addEventListener("click", async () => {
       const files = Array.from(document.getElementById("ai-images").files || []);
-      if (files.length === 0) { this.toast("Choose at least one image first."); return; }
-      const subject = document.getElementById("ai-subject").value;
-      const count = Number(document.getElementById("ai-count").value) || 20;
-      const statusEl = document.getElementById("aiGenStatus");
-      const runBtn = document.getElementById("runAiGen");
+      const pasted = document.getElementById("ai-paste").value.trim();
+      const engine = document.getElementById("ai-engine").value;
+      if (files.length === 0 && !pasted) { this.toast("Choose a PDF/image, or paste some questions."); return; }
+      if (engine === "ai" && !GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
+      const statusEl = document.getElementById("aiGenStatus"), runBtn = document.getElementById("runAiGen");
+      const cfg = {
+        engine, pasteText: pasted, answerKeyText: document.getElementById("ai-key").value.trim(),
+        keyFiles: Array.from(document.getElementById("ai-keyimg").files || []),
+        mode: document.getElementById("ai-mode").value,
+        subject: document.getElementById("ai-subject").value,
+        from: Number(document.getElementById("ai-from").value) || 0,
+        to: Number(document.getElementById("ai-to").value) || 0,
+        max: Number(document.getElementById("ai-count").value) || 0,
+        solve: document.getElementById("ai-solve").value === "1"
+      };
       runBtn.disabled = true;
-      statusEl.textContent = "Reading images…";
+      const say = (m) => { statusEl.style.color = "var(--text-2)"; statusEl.textContent = m; };
       try {
-        const base64List = await Promise.all(files.map(f => this.fileToBase64(f)));
-        statusEl.textContent = "Asking the AI to read the images and build the question set — this can take a bit…";
-        const questions = await GeminiService.generateQuestionsFromImages(base64List, subject, count);
-        this.hideModal();
-        this.toast(`Generated ${questions.length} questions.`);
-        this.startExamRunner(questions);
+        const out = cfg.engine === "local"
+          ? await this.importLocally(files, cfg, say)
+          : await this.importFromFiles(files, cfg, say);
+        if (cfg.engine !== "local" && ((cfg.keyFiles && cfg.keyFiles.length) || cfg.answerKeyText)) {
+          const kt = ((cfg.answerKeyText || "") + "\n" + await this.readKeySheet(cfg.keyFiles, say)).trim();
+          const res = this.applyKeyMap(out.questions, QuestionParser.parseKeyText(kt));
+          out.stats.fromKey = (out.stats.fromKey || 0) + res.applied;
+          out.stats.unknown = out.questions.filter(q => !q.correctOptionId).length;
+        }
+        const base = files.length ? files[0].name.replace(/\.[^.]+$/, "") : "Pasted paper";
+        this.showImportPreview({ name: base + (files.length > 1 ? " (+" + (files.length - 1) + ")" : ""), questions: out.questions, stats: out.stats }, false);
       } catch (err) {
         runBtn.disabled = false;
+        statusEl.style.color = "var(--red-600)";
         statusEl.textContent = this.friendlyGeminiError(err);
       }
+    });
+    this.showModal();
+  },
+
+  /* ===== NO-API-KEY PATH: text layer or built-in OCR -> local parser ===== */
+  /* Any mix of PDFs/images -> [{page, text}], using the text layer when there
+     is one and built-in OCR when there isn't. Shared by the paper and the
+     answer-key sheet. */
+  async filesToPages(files, cfg, say, tag) {
+    const pages = [];
+    let ocrPages = 0;
+    for (const f of files) {
+      const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+      if (!isPdf) {
+        const b64 = await this.fileToBase64(f);
+        say("Reading " + (tag || "") + f.name + " with built-in OCR…");
+        const got = await OcrEngine.recognize([{ page: pages.length + 1, b64 }], say);
+        ocrPages++;
+        pages.push({ page: pages.length + 1, text: got[0].text });
+        continue;
+      }
+      say("Opening " + f.name + "…");
+      const doc = await PdfReader.open(f);
+      const from = Math.max(1, cfg.from || 1), to = Math.min(doc.numPages, cfg.to || doc.numPages);
+      if (from > to) throw new Error("PDF_UNREADABLE: the page range is outside this PDF (it has " + doc.numPages + " pages).");
+      const nums = []; for (let n = from; n <= to; n++) nums.push(n);
+      if (nums.length > 80) throw new Error("PDF_UNREADABLE: that's " + nums.length + " pages — import at most 80 at a time (use the page range).");
+
+      let texts = null, needOcr = cfg.mode === "images";
+      if (!needOcr) {
+        say("Checking for a text layer in " + nums.length + " page" + (nums.length > 1 ? "s" : "") + "…");
+        texts = await PdfReader.extractText(doc, nums);
+        const avg = texts.reduce((t, x) => t + x.text.length, 0) / texts.length;
+        needOcr = avg < 120;
+      }
+      if (!needOcr) {
+        say("This PDF has selectable text — reading it directly, no OCR needed.");
+        texts.forEach(t => pages.push(t));
+      } else {
+        say("Rendering " + nums.length + " page" + (nums.length > 1 ? "s" : "") + " for OCR…");
+        const imgs = await PdfReader.renderPages(doc, nums, (i, n) => say("Rendering page " + i + " of " + n + "…"),
+          { maxWidth: 2200, maxScale: 3, png: true, grayscale: true });
+        const got = await OcrEngine.recognize(imgs, say);
+        ocrPages += got.length;
+        got.forEach(g => pages.push(g));
+      }
+    }
+    return { pages, ocrPages };
+  },
+
+  /* OCR/read an answer-key sheet (photo, scan or PDF) into raw key text. */
+  async readKeySheet(files, say) {
+    if (!files || !files.length) return "";
+    say("Reading the answer-key sheet…");
+    const { pages } = await this.filesToPages(files, { mode: "auto" }, say, "answer key ");
+    return pages.map(p => p.text).join("\n");
+  },
+
+  /* Fill in missing answers from a parsed key map (section-aware). */
+  applyKeyMap(questions, map) {
+    let n = 0, amb = 0;
+    questions.forEach(q => {
+      if (q.correctOptionId) return;
+      const r = QuestionParser.keyFor(map, q.number, q.subject);
+      if (r.answer && "abcde".indexOf(r.answer) < q.options.length) {
+        q.correctOptionId = r.answer; q.answerSource = "key"; n++;
+      } else if (r.ambiguous) amb++;
+    });
+    return { applied: n, ambiguous: amb };
+  },
+
+  /* ===== NO-API-KEY PATH: text layer or built-in OCR -> local parser ===== */
+  async importLocally(files, cfg, say) {
+    const { pages, ocrPages } = await this.filesToPages(files, cfg, say);
+    if (cfg.pasteText) pages.push({ page: pages.length + 1, text: cfg.pasteText });
+    if (!pages.length) throw new Error("NO_QUESTIONS: nothing to read.");
+
+    let keyText = cfg.answerKeyText || "";
+    if (cfg.keyFiles && cfg.keyFiles.length) {
+      const fromSheet = await this.readKeySheet(cfg.keyFiles, say);
+      keyText = (keyText + "\n" + fromSheet).trim();
+    }
+
+    say("Pulling out questions, options and the answer key…");
+    const out = QuestionParser.parse(pages, { subject: cfg.subject, max: cfg.max, answerKeyText: keyText });
+    if (!out.questions.length) {
+      throw new Error("NO_QUESTIONS: the local parser found no numbered questions with (a)/(b)/(c) options" +
+        (ocrPages ? " in the OCR text" : " in this file") +
+        ". If the scan is faint or two-column, try 'Always OCR the pages as images', crop the photos tighter, or switch the Reader to an AI provider.");
+    }
+    out.stats.ocrPages = ocrPages;
+    out.stats.engine = "local";
+    return out;
+  },
+
+  /* Reads PDFs/images -> batches -> GeminiService.importQuestions. */
+  async importFromFiles(files, cfg, say) {
+    const batches = [];
+    const visionWarn = ["groq", "openrouter", "llm7"].includes(GeminiService.getProvider());
+    const imageBatchesFrom = (items) => PdfReader.makeBatches(items, 3, 2).map(g => ({ label: PdfReader.pageLabel(g), images: g.map(x => x.b64) }));
+    for (const f of files) {
+      const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+      if (!isPdf) {
+        say("Reading image " + f.name + "…");
+        const b64 = await this.fileToBase64(f);
+        batches.push({ label: f.name, images: [b64], _single: true });
+        continue;
+      }
+      say("Opening " + f.name + "…");
+      const doc = await PdfReader.open(f);
+      const from = Math.max(1, cfg.from || 1), to = Math.min(doc.numPages, cfg.to || doc.numPages);
+      if (from > to) throw new Error("PDF_UNREADABLE: the page range is outside this PDF (it has " + doc.numPages + " pages).");
+      const pages = []; for (let n = from; n <= to; n++) pages.push(n);
+      if (pages.length > 80) throw new Error("PDF_UNREADABLE: that's " + pages.length + " pages — please import at most 80 pages at a time (use the page range).");
+      let mode = cfg.mode === "images" ? "images" : "text";
+      let texts = null;
+      if (mode === "text") {
+        say("Checking for selectable text in " + pages.length + " page" + (pages.length > 1 ? "s" : "") + "…");
+        texts = await PdfReader.extractText(doc, pages);
+        const avg = texts.reduce((t, x) => t + x.text.length, 0) / texts.length;
+        if (avg < 120) mode = "images"; // scanned: no usable text layer
+      }
+      if (mode === "text") {
+        say("Found selectable text — reading it directly (no OCR needed).");
+        PdfReader.makeBatches(texts, 3, 2).forEach(g => batches.push({
+          label: PdfReader.pageLabel(g),
+          text: g.map(x => "--- PAGE " + x.page + " ---\n" + x.text).join("\n\n")
+        }));
+      } else {
+        say((cfg.mode === "images" ? "Rendering" : "This looks like a scanned PDF — rendering") + " " + pages.length + " page" + (pages.length > 1 ? "s" : "") + " as images…" + (visionWarn ? " (Note: your current provider's default model may not read images — if this fails, switch to Gemini.)" : ""));
+        const imgs = await PdfReader.renderPages(doc, pages, (i, n) => say("Rendering page " + i + " of " + n + "…"));
+        imageBatchesFrom(imgs).forEach(b => batches.push(b));
+      }
+    }
+    // Group loose single images into windows of 3 too
+    const singles = batches.filter(b => b._single), others = batches.filter(b => !b._single);
+    const merged = others.concat(PdfReader.makeBatches(singles.map((b, i) => ({ page: i + 1, b64: b.images[0] })), 3, 2)
+      .map(g => ({ label: g.length === 1 ? "image " + g[0].page : "images " + g[0].page + "–" + g[g.length - 1].page, images: g.map(x => x.b64) })));
+    return GeminiService.importQuestions(merged, { subject: cfg.subject, max: cfg.max, solveMissing: cfg.solve, onProgress: say });
+  },
+
+  /* Shows every extracted question IN FULL so OCR mistakes can be spotted. */
+  showImportPreview(paper, alreadySaved) {
+    const st = paper.stats || {};
+    const letter = (id) => id.toUpperCase();
+    const missing = paper.questions.filter(q => !q.correctOptionId).length;
+    const qHtml = paper.questions.map((q, i) => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border, #e3e5ec);">
+        ${q.passage && (i === 0 || paper.questions[i - 1].passage !== q.passage) ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:12px;color:var(--text-2);">Shared passage / set-up (${q.passage.length} chars) — click to read</summary><div style="white-space:pre-wrap;font-size:12.5px;line-height:1.55;padding:8px 10px;margin-top:6px;border:1px solid var(--border, #e3e5ec);border-radius:6px;">${this.esc(q.passage)}</div></details>` : ""}
+        <div style="font-weight:600;font-size:13.5px;white-space:pre-wrap;">${i + 1}. ${this.esc(q.prompt)}</div>
+        <div style="font-size:11.5px;color:var(--text-2);margin:2px 0 4px;">${this.esc(q.subject)}${q.number ? " · paper Q" + q.number : ""}${!q.correctOptionId ? ' · <span style="color:var(--red-600);">no answer set</span>' : ""}</div>
+        ${q.options.map(o => `<div role="button" tabindex="0" data-set-ans="${i}:${o.id}" title="Click to mark as the correct answer" style="cursor:pointer;font-size:13px;padding:1px 4px 1px 14px;border-radius:4px;${o.id === q.correctOptionId ? "color:var(--green-600);font-weight:600;" : ""}">${letter(o.id)}) ${this.esc(o.text)}${o.id === q.correctOptionId ? " ✓" : ""}</div>`).join("")}
+        ${q.answerSource === "inferred" ? `<div class="label-sm" style="margin-top:4px;color:var(--red-600);">⚠ Answer worked out by the AI (no key in the paper) — verify it.</div>` : ""}
+        ${q.answerSource === "manual" ? `<div class="label-sm" style="margin-top:4px;">Answer set by you.</div>` : ""}
+      </div>`).join("");
+    document.getElementById("modalTitle").textContent = "Imported: " + paper.questions.length + " questions";
+    document.getElementById("modalBody").innerHTML = `
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:8px;">
+        ${st.fromKey != null ? `${st.fromKey} answer${st.fromKey === 1 ? "" : "s"} from the paper's key` : ""}${st.solved ? ` · <strong style="color:var(--red-600);">${st.solved} solved by AI (verify)</strong>` : ""}${st.dropped ? ` · ${st.dropped} block(s) skipped (no options found)` : ""}${st.withPassage ? ` · ${st.withPassage} question(s) carry a shared passage` : ""}${st.ambiguous ? ` · ${st.ambiguous} key lookup(s) ambiguous across sections` : ""}${st.ocrPages ? ` · ${st.ocrPages} page(s) read by built-in OCR` : ""}${st.skippedBatches ? ` · ${st.skippedBatches} page group(s) couldn't be read` : ""}.
+        ${missing ? `<strong style="color:var(--red-600);">${missing} question(s) have no answer yet — click the correct option below, or paste the key.</strong> ` : ""}
+        Check the wording against your paper — OCR can slip on symbols and fractions.</p>
+      <div class="form-grid" style="margin-bottom:10px;">
+        <div class="form-field full"><label>Set the answer key in bulk (optional)</label>
+          <div style="display:flex;gap:8px;"><input type="text" id="imp-key" placeholder="1c 2a 3d 4b …  (section headings allowed)" style="flex:1;"><button class="btn btn-sm" id="impKeyApply">Apply</button></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:6px;"><input type="file" id="imp-keyimg" accept="application/pdf,.pdf,image/*" multiple style="flex:1;"><button class="btn btn-sm" id="impKeyImg">Read key image</button></div>
+          <span class="label-sm" id="impKeyStatus"></span></div>
+      </div>
+      <div class="form-field full"><label>Save as</label><input type="text" id="imp-name" value="${this.esc(paper.name)}"></div>
+      <div style="max-height:46vh;overflow:auto;border:1px solid var(--border, #e3e5ec);border-radius:8px;padding:0 12px;margin-bottom:10px;">${qHtml}</div>
+      <div class="form-actions" style="flex-wrap:wrap;">
+        <button class="btn btn-sm" id="impCopy">Copy as text</button>
+        <button class="btn btn-sm" id="impDl">Download .txt</button>
+        <button class="btn" id="impClose">Close</button>
+        ${alreadySaved ? "" : `<button class="btn" id="impSave">Save to my papers</button>`}
+        <button class="btn btn-primary" id="impStart">${alreadySaved ? "Start timed exam" : "Save &amp; start timed exam"}</button>
+      </div>`;
+    const asText = () => paper.questions.map((q, i) => `${q.passage && (i === 0 || paper.questions[i - 1].passage !== q.passage) ? q.passage + "\n\n" : ""}${i + 1}. ${q.prompt}\n${q.options.map(o => `   ${letter(o.id)}) ${o.text}`).join("\n")}\n   Answer: ${letter(q.correctOptionId)}${q.answerSource === "inferred" ? " (AI-solved)" : ""}`).join("\n\n");
+    const save = () => {
+      if (alreadySaved) return paper;
+      const saved = { id: "imp" + Date.now(), name: (document.getElementById("imp-name").value.trim() || paper.name), date: new Date().toISOString().slice(0, 10), stats: st, questions: paper.questions };
+      AppState.importedPapers.push(saved); this.persist(); return saved;
+    };
+    const rerender = () => {
+      const nm = document.getElementById("imp-name");
+      if (nm) paper.name = nm.value.trim() || paper.name;
+      this.showImportPreview(paper, alreadySaved);
+    };
+    document.getElementById("modalBody").querySelectorAll("[data-set-ans]").forEach(el => {
+      el.addEventListener("click", () => {
+        const [i, oid] = el.getAttribute("data-set-ans").split(":");
+        const q = paper.questions[Number(i)];
+        q.correctOptionId = q.correctOptionId === oid ? null : oid;
+        q.answerSource = q.correctOptionId ? "manual" : "unknown";
+        if (alreadySaved) this.persist();
+        rerender();
+      });
+    });
+    const applyKeyText = (raw) => {
+      const map = QuestionParser.parseKeyText(raw);
+      if (!map.__count) { this.toast("Couldn't read that key — try '1c 2a 3d'."); return; }
+      const res = this.applyKeyMap(paper.questions, map);
+      if (alreadySaved) this.persist();
+      this.toast(res.applied + " answer(s) applied" + (res.ambiguous ? ", " + res.ambiguous + " ambiguous (same number in more than one section)" : "") + ".");
+      rerender();
+    };
+    const keyBtn = document.getElementById("impKeyApply");
+    if (keyBtn) keyBtn.addEventListener("click", () => {
+      const raw = document.getElementById("imp-key").value;
+      if (raw.trim()) applyKeyText(raw);
+    });
+    const keyImgBtn = document.getElementById("impKeyImg");
+    if (keyImgBtn) keyImgBtn.addEventListener("click", async () => {
+      const fs2 = Array.from(document.getElementById("imp-keyimg").files || []);
+      if (!fs2.length) { this.toast("Choose a photo or PDF of the answer key first."); return; }
+      const st2 = document.getElementById("impKeyStatus");
+      keyImgBtn.disabled = true;
+      try {
+        const txt = await this.readKeySheet(fs2, (m) => { if (st2) st2.textContent = m; });
+        if (st2) st2.textContent = "";
+        applyKeyText(txt);
+      } catch (err) {
+        if (st2) st2.textContent = "";
+        keyImgBtn.disabled = false;
+        this.toast(this.friendlyGeminiError(err));
+      }
+    });
+    document.getElementById("impCopy").addEventListener("click", () => {
+      (navigator.clipboard ? navigator.clipboard.writeText(asText()) : Promise.reject()).then(() => this.toast("Copied all questions."), () => this.toast("Couldn't copy — use Download .txt instead."));
+    });
+    document.getElementById("impDl").addEventListener("click", () => {
+      const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([asText()], { type: "text/plain" }));
+      a.download = (document.getElementById("imp-name").value.trim() || "paper") + ".txt"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    });
+    document.getElementById("impClose").addEventListener("click", () => { this.hideModal(); });
+    const saveBtn = document.getElementById("impSave");
+    if (saveBtn) saveBtn.addEventListener("click", () => { save(); this.hideModal(); this.toast("Saved — find it under Imported Papers."); this.renderCurrentPage(); });
+    document.getElementById("impStart").addEventListener("click", () => {
+      if (missing && !confirm(missing + " question(s) still have no correct answer. They will be shown but left out of your score. Start anyway?")) return;
+      const saved = save(); this.hideModal();
+      this.startExamRunner(JSON.parse(JSON.stringify(saved.questions)));
     });
     this.showModal();
   },
@@ -706,6 +1001,8 @@ const UI = {
     if (msg.startsWith("MODEL_NOT_FOUND")) return msg.replace("MODEL_NOT_FOUND: ", "");
     if (msg.startsWith("RATE_LIMIT")) return msg.replace("RATE_LIMIT: ", "");
     if (msg.startsWith("OVERLOADED")) return msg.replace("OVERLOADED: ", "");
+    if (msg.startsWith("PDF_LOCKED") || msg.startsWith("PDF_UNREADABLE")) return msg.replace(/^PDF_\w+:\s*/, "");
+    if (msg.startsWith("NO_QUESTIONS")) return msg.replace("NO_QUESTIONS: ", "");
     if (msg.startsWith("NETWORK_ERROR")) return msg.replace("NETWORK_ERROR: ", "Couldn't connect — ");
     if (msg.startsWith("MALFORMED_RESPONSE") || msg.startsWith("EMPTY_RESPONSE")) return `${label}'s response wasn't usable — just try again, or switch to a stronger model in Settings.`;
     return "Something went wrong: " + msg.slice(0, 220);
@@ -765,6 +1062,7 @@ const UI = {
         </div>
         <div class="exam-palette">${paletteHtml}</div>
         <div class="exam-question card">
+          ${q.passage ? `<div class="exam-passage" style="max-height:34vh;overflow:auto;white-space:pre-wrap;font-size:13.5px;line-height:1.6;padding:12px 14px;margin-bottom:12px;border:1px solid var(--border, #e3e5ec);border-radius:8px;background:var(--bg-2, rgba(127,127,127,.06));">${this.esc(q.passage)}</div>` : ""}
           <p class="exam-prompt">${this.esc(q.prompt)}</p>
           <div class="exam-options">
             ${q.options.map(o => `
@@ -826,6 +1124,7 @@ const UI = {
       <div class="card" style="margin-bottom:16px;">
         <h3>${autoSubmitted ? "Time's up — auto-submitted" : "Test Submitted"}</h3>
         <div class="big-number" style="font-size:32px;margin-top:8px;">${grade.correct} / ${grade.total} (${grade.percent}%)</div>
+        ${grade.ungraded ? `<div class="label-sm" style="color:var(--red-600);">${grade.ungraded} question(s) had no answer key and were left out of the score.</div>` : ""}
         <div class="grid grid-3" style="margin-top:14px;">
           ${Object.keys(grade.bySubject).map(s => {
             const b = grade.bySubject[s];
@@ -847,9 +1146,10 @@ const UI = {
       const rev = document.getElementById("examReview");
       rev.innerHTML = grade.results.map((r, i) => `
         <div class="card" style="margin-bottom:8px;">
-          <div style="display:flex;justify-content:space-between;"><strong>Q${i + 1}</strong><span class="badge ${r.isCorrect ? "strong" : "weak"}">${r.isCorrect ? "Correct" : "Incorrect"}</span></div>
+          <div style="display:flex;justify-content:space-between;"><strong>Q${i + 1}</strong><span class="badge ${!r.question.correctOptionId ? "" : (r.isCorrect ? "strong" : "weak")}">${!r.question.correctOptionId ? "Not scored" : (r.isCorrect ? "Correct" : "Incorrect")}</span></div>
           <p style="font-size:13.5px;margin-top:6px;">${this.esc(r.question.prompt)}</p>
-          <p class="label-sm">Your answer: ${r.chosen ? r.chosen.toUpperCase() : "—"} · Correct: ${r.question.correctOptionId.toUpperCase()}</p>
+          <p class="label-sm">Your answer: ${r.chosen ? r.chosen.toUpperCase() : "—"} · Correct: ${r.question.correctOptionId ? r.question.correctOptionId.toUpperCase() : "not set"}</p>
+          ${r.question.answerSource === "inferred" ? `<p class="task-note" style="color:var(--red-600);">⚠ This paper had no answer key — the AI worked out this answer, so double-check it.</p>` : ""}
           ${r.question.explanation ? `<p class="task-note">${this.esc(r.question.explanation)}</p>` : ""}
         </div>`).join("");
     });
@@ -1362,11 +1662,16 @@ const UI = {
             </select></div>
           <div class="form-field"><label>Questions</label>
             <select id="vv-count"><option value="5">5 (quick)</option><option value="8" selected>8</option><option value="10">10 (full)</option></select></div>
+          <div class="form-field full"><label>Panel</label>
+            <select id="vv-engine">
+              <option value="local">Built-in panel — no API key, works offline</option>
+              <option value="ai" ${GeminiService.hasApiKey() ? "" : "disabled"}>AI panel${GeminiService.hasApiKey() ? " (" + this.esc(GeminiService.providerLabel()) + ")" : " — set up a provider in Settings first"}</option>
+            </select></div>
           <div class="form-field full"><label>About you (optional — tailors the personal questions)</label>
             <textarea id="vv-profile" placeholder="e.g. BBA from NSU, 2 years in sales at a FMCG company, want to move into marketing management">${this.esc(AppState.vivaProfile || "")}</textarea></div>
         </div>
         <div class="form-actions" style="justify-content:flex-start;"><button class="btn btn-primary" id="vvStart">Start VIVA</button></div>
-        <p class="label-sm" style="margin-top:8px;">Uses ${GeminiService.hasApiKey() ? this.esc(GeminiService.providerLabel()) : "no AI provider yet"}. ${GeminiService.hasApiKey() ? "" : "Set one up in Settings first."} The scoring is an AI's opinion — use it to practise structure and content, not as a prediction of the real panel.</p>
+        <p class="label-sm" style="margin-top:8px;">The <strong>built-in panel</strong> needs no key and no internet: it asks from a bank of real IBA-style viva questions and scores each answer on coverage, specificity, structure, length and filler, then shows a model answer. The <strong>AI panel</strong> writes questions tailored to your background and gives free-form feedback, but needs a provider key in Settings. Either way the scoring is practice feedback, not a prediction of the real panel.</p>
       </div>
       ${sessions.length ? `<div class="card" style="max-width:600px;margin-top:16px;"><h3>Past sessions</h3>
         <div class="table-wrap"><table><thead><tr><th>Date</th><th>Focus</th><th>Qs</th><th>Avg</th></tr></thead><tbody>
@@ -1374,21 +1679,27 @@ const UI = {
         </tbody></table></div></div>` : ""}
     `;
     document.getElementById("vvStart").addEventListener("click", () => {
-      if (!GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
+      const engine = document.getElementById("vv-engine").value;
+      if (engine === "ai" && !GeminiService.hasApiKey()) { this.needAiKeyModal(); return; }
       AppState.vivaProfile = document.getElementById("vv-profile").value.trim();
       this.persist();
-      this.startViva(document.getElementById("vv-focus").value, Number(document.getElementById("vv-count").value));
+      this.startViva(document.getElementById("vv-focus").value, Number(document.getElementById("vv-count").value), engine);
     });
   },
 
-  async startViva(focus, count) {
-    this._viva = { mode: "loading", msg: "Your panel is preparing questions…", focus, count, questions: [], idx: 0, results: [], draft: "", saved: false };
+  async startViva(focus, count, engine) {
+    engine = engine || "local";
+    this._viva = { mode: "loading", msg: "Your panel is preparing questions…", focus, count, engine, questions: [], idx: 0, results: [], draft: "", saved: false };
     this.renderVivaState();
     try {
-      this._viva.questions = await GeminiService.generateVivaQuestions({ focus, count, profile: AppState.vivaProfile });
+      this._viva.questions = engine === "local"
+        ? LocalViva.pick(focus, count, AppState.vivaProfile)
+        : await GeminiService.generateVivaQuestions({ focus, count, profile: AppState.vivaProfile });
       this._viva.mode = "question";
     } catch (err) {
-      this._viva.mode = "error"; this._viva.error = this.friendlyGeminiError(err); this._viva.retry = () => this.startViva(focus, count);
+      this._viva.mode = "error";
+      this._viva.error = this.friendlyGeminiError(err) + " You can run the built-in panel instead — it needs no key.";
+      this._viva.retry = () => this.startViva(focus, count, "local");
     }
     this.renderVivaState();
   },
@@ -1478,6 +1789,7 @@ const UI = {
           <div class="big-number" style="font-size:34px;margin-top:6px;">${r.score.toFixed(1)} <span style="font-size:16px;color:var(--text-2);">/ 10</span></div>
           <div class="progress-track" style="margin:8px 0;"><div class="progress-fill ${pct < 50 ? "red" : "green"}" style="width:${pct}%"></div></div>
           <p style="font-size:14px;margin-top:6px;">${this.esc(r.verdict)}</p>
+          ${r.breakdown ? `<p class="label-sm">${r.breakdown.words} words · ${r.breakdown.covered}/${r.breakdown.totalPoints} expected points covered · specificity ${r.breakdown.specificity}/4 · structure ${r.breakdown.structure}/4${r.breakdown.filler ? ` · ${r.breakdown.filler} filler phrase(s)` : ""}</p>` : ""}
           <h3 style="margin-top:14px;">What worked</h3>${list(r.strengths)}
           <h3 style="margin-top:14px;">To improve</h3>${list(r.improvements)}
           <details style="margin-top:14px;"><summary style="cursor:pointer;font-weight:600;font-size:13.5px;">See a model answer</summary>
@@ -1523,12 +1835,18 @@ const UI = {
     const answer = (ta ? ta.value : v.draft).trim();
     if (answer.split(/\s+/).filter(Boolean).length < 5) { this.toast("Write a few sentences first (or press Skip)."); return; }
     this.stopVivaMic(); Speech.stop();
-    v.draft = answer; v.mode = "evaluating"; this.renderVivaState();
+    v.draft = answer;
+    if (v.engine === "local") {
+      const fb = LocalViva.evaluate(v.questions[v.idx], answer);
+      this.recordVivaResult(Object.assign({ answer }, fb));
+      return;
+    }
+    v.mode = "evaluating"; this.renderVivaState();
     try {
       const fb = await GeminiService.evaluateVivaAnswer(v.questions[v.idx], answer, AppState.vivaProfile);
       this.recordVivaResult(Object.assign({ answer }, fb));
     } catch (err) {
-      v.mode = "error"; v.error = this.friendlyGeminiError(err);
+      v.mode = "error"; v.error = this.friendlyGeminiError(err) + " Your answer is still in the box — you can also restart with the built-in panel.";
       v.retry = () => { v.mode = "question"; this.renderVivaState(); };
       this.renderVivaState();
     }

@@ -39,7 +39,8 @@ function defaultState() {
     vocabWordsLearned: 0,
     vocabMastery: {},           // { "Abate": { data: <cached Gemini item>, mastered: bool, misses: 0 } } — caches AI output so words aren't re-fetched every time
     vivaSessions: [],           // [{id, date, focus, count, avgScore, items:[{question, category, answer, score, skipped}]}]
-    vivaProfile: ""             // optional "about me" text used to tailor VIVA questions
+    vivaProfile: "",            // optional "about me" text used to tailor VIVA questions
+    importedPapers: []          // [{id,name,date,stats,questions:[...]}] — papers imported from PDF/photos, re-takeable any time
   };
 }
 
